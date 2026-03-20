@@ -192,3 +192,4 @@ def test_clean_pipeline_and_report():
     assert report.dropped_missing_critical == 1
     assert report.dropped_out_of_range == 1
     assert report.dropped_duplicates == 1
+    assert report.dropped_insufficient_maturities == 0
