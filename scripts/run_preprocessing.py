@@ -1,28 +1,62 @@
-from vasicek_poisson.config import RAW_DATA_DIR, AAA_FILENAME, ALL_BONDS_FILENAME
+import argparse
+import json
+
+from vasicek_poisson.config import (
+    RAW_DATA_DIR,
+    PROCESSED_DATA_DIR,
+    AAA_FILENAME,
+    ALL_BONDS_FILENAME,
+)
+from vasicek_poisson.data.builder import ECBDataBuilder
+from vasicek_poisson.data.cleaner import ECBDataCleaner
 from vasicek_poisson.data.loader import ECBDataLoader
-from vasicek_poisson.data.parser import ECBDataParser
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--min-maturity", type=float, default=0.25)
+    parser.add_argument("--max-maturity", type=float, default=30.0)
+    parser.add_argument("--min-maturities", type=int, default=None)
+    args = parser.parse_args()
+
     loader = ECBDataLoader(RAW_DATA_DIR)
-    parser = ECBDataParser()
+    cleaner = ECBDataCleaner(
+        min_maturity=args.min_maturity,
+        max_maturity=args.max_maturity,
+        min_maturities=args.min_maturities,
+    )
+    builder = ECBDataBuilder(cleaner=cleaner)
 
     df_aaa, df_all = loader.load_pair(AAA_FILENAME, ALL_BONDS_FILENAME)
 
-    aaa_spot = parser.keep_core_columns(parser.filter_spot_rates(df_aaa))
-    all_spot = parser.keep_core_columns(parser.filter_spot_rates(df_all))
+    aaa_result = builder.build_cleaned_spot_panel(df_aaa)
+    all_result = builder.build_cleaned_spot_panel(df_all)
 
-    aaa_spot = parser.add_maturity_years(aaa_spot)
-    all_spot = parser.add_maturity_years(all_spot)
+    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("AAA spot sample:")
-    print(aaa_spot.head())
+    aaa_result.cleaned.to_csv(PROCESSED_DATA_DIR / "aaa_spot_clean.csv", index=False)
+    all_result.cleaned.to_csv(PROCESSED_DATA_DIR / "all_spot_clean.csv", index=False)
+
+    report = {
+        "aaa": aaa_result.report.__dict__,
+        "all": all_result.report.__dict__,
+        "min_maturity": args.min_maturity,
+        "max_maturity": args.max_maturity,
+        "min_maturities": args.min_maturities,
+    }
+    (PROCESSED_DATA_DIR / "cleaning_report.json").write_text(
+        json.dumps(report, indent=2),
+        encoding="utf-8",
+    )
+
+    print("AAA cleaned sample:")
+    print(aaa_result.cleaned.head())
     print()
-    print("ALL spot sample:")
-    print(all_spot.head())
+    print("ALL cleaned sample:")
+    print(all_result.cleaned.head())
     print()
-    print("Unique maturities (AAA):")
-    print(sorted(aaa_spot["maturity_years"].unique())[:10])
+    print("Cleaning report:")
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":
