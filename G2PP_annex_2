@@ -1052,5 +1052,501 @@ end
 This is now copy-paste oriented: **Annex A goes into the class**, **Annex B goes into individual `.m` files**.
 
 
+------------
+
+%% ========================================================
+%  G2++ Swaption Pricing Test: Yearfrac first, then dates
+%  Object under test:
+%
+%       G2PP.priceSwaptionG2PP(...)
+%
+%  Assumption:
+%       OIS curve is already loaded in the workspace as either:
+%
+%           oisCurve
+%
+%       or:
+%
+%           discountCurve and forecastCurve
+%
+%  Single-curve test convention:
+%       discountCurve = OIS
+%       forecastCurve = OIS
+%
+%  This is a pricing validation script, not a calibration script.
+% =========================================================
+
+clc;
+
+%% ========================================================
+%  0. Resolve OIS curves from workspace
+% =========================================================
+
+if exist("discountCurve", "var") ~= 1 || exist("forecastCurve", "var") ~= 1
+
+    if exist("oisCurve", "var") == 1
+        discountCurve = oisCurve;
+        forecastCurve = oisCurve;
+    else
+        error("Define either oisCurve or both discountCurve and forecastCurve in the workspace.");
+    end
+end
+
+assert(isa(discountCurve, "ZCCurve"), "discountCurve must be a ZCCurve.");
+assert(isa(forecastCurve, "ZCCurve"), "forecastCurve must be a ZCCurve.");
+
+%% ========================================================
+%  1. Resolve pricing date
+% =========================================================
+
+if exist("pricingDate", "var") ~= 1
+
+    if isprop(discountCurve, "pricingDate")
+        pricingDate = discountCurve.pricingDate;
+    elseif isprop(discountCurve, "date")
+        pricingDate = discountCurve.date;
+    else
+        error("Define pricingDate manually, for example pricingDate = '31/12/2015';");
+    end
+end
+
+% The current class often expects char/string dates in format dd/mm/yyyy.
+if isnumeric(pricingDate)
+    pricingDateChar = datestr(pricingDate, "dd/mm/yyyy");
+elseif isstring(pricingDate)
+    pricingDateChar = char(pricingDate);
+elseif ischar(pricingDate)
+    pricingDateChar = pricingDate;
+else
+    error("Unsupported pricingDate format.");
+end
+
+pricingDateDnum = datenum(pricingDateChar, "dd/mm/yyyy");
+
+fprintf("Pricing date used: %s\n", pricingDateChar);
+
+%% ========================================================
+%  2. Build G2++ model object
+% =========================================================
+
+basis = 3;  % ACT/365, aligned with your current class convention
+
+% Initial parameters for testing only.
+% They do not need to be calibrated yet.
+a0 = 0.10;
+b0 = 0.30;
+rho0 = -0.70;
+sigma0 = 0.010;
+eta0 = 0.010;
+
+G2PP = GaussianTwoFactors( ...
+    pricingDateChar, ...
+    a0, ...
+    b0, ...
+    discountCurve, ...
+    forecastCurve, ...
+    "basis", basis, ...
+    "displayLog", false);
+
+% The current constructor does not necessarily initialize these.
+G2PP.correlation = rho0;
+
+% Volatility bucket structure.
+% If timeSteps = [1 2 3 ...], buckets are:
+% [0,1], [1,2], ..., [last, Inf].
+G2PP.volatilityTimeStructure = [1 2 3 4 5 7 10 15 20 30];
+
+nBuckets = numel(G2PP.volatilityTimeStructure) + 1;
+
+G2PP.volatility_sigma = sigma0 .* ones(1, nBuckets);
+G2PP.volatility_eta   = eta0   .* ones(1, nBuckets);
+
+fprintf("G2PP model created.\n");
+fprintf("a = %.6f, b = %.6f, sigma = %.6f, eta = %.6f, rho = %.6f\n", ...
+    G2PP.meanReversion_x, ...
+    G2PP.meanReversion_y, ...
+    G2PP.volatility_sigma(1), ...
+    G2PP.volatility_eta(1), ...
+    G2PP.correlation);
+
+%% ========================================================
+%  3. Check required method availability
+% =========================================================
+
+availableMethods = string(methods(G2PP));
+
+requiredMethods = [
+    "getSwaptionInstrument"
+    "getSwaptionBondBasket"
+    "getLambda"
+    "getYBarFunc"
+    "yBarSolver"
+    "h1Function"
+    "h2Function"
+    "kappaFunction"
+    "getStateGaussianAtExpiry"
+    "getConditionalYMoments"
+    "brigoSwaptionIntegrand"
+];
+
+missingMethods = setdiff(requiredMethods, availableMethods);
+
+assert(isempty(missingMethods), ...
+    "Missing required G2++ methods: " + strjoin(missingMethods, ", "));
+
+hasPriceMethod = any(availableMethods == "priceSwaptionG2PP") ...
+              || any(availableMethods == "getSwaptionPriceG2PP");
+
+assert(hasPriceMethod, ...
+    "Missing pricing method: expected priceSwaptionG2PP or getSwaptionPriceG2PP.");
+
+disp("Test 1 passed: required methods are available.");
+
+%% ========================================================
+%  4. Build test swaption dates and equivalent year fractions
+% =========================================================
+
+% We build dates first, then convert to yearfrac.
+% This makes the later date-vs-yearfrac comparison meaningful.
+
+expiryDate = addDay(pricingDateChar, {"5Y"});
+
+payTenors = arrayfun(@(k) sprintf("%dY", k), 6:15, "UniformOutput", false);
+paymentDatesDate = addDay(pricingDateChar, payTenors);
+
+expiryY = yearfracExtend(pricingDateDnum, expiryDate, G2PP.basis);
+paymentDatesY = yearfracExtend(pricingDateDnum, paymentDatesDate, G2PP.basis);
+
+paymentDatesY = paymentDatesY(:).';
+
+assert(expiryY > 0, "expiryY must be positive.");
+assert(all(paymentDatesY > expiryY), "All payment dates must be after expiry.");
+
+fprintf("Expiry yearfrac: %.8f\n", expiryY);
+fprintf("First payment yearfrac: %.8f\n", paymentDatesY(1));
+fprintf("Last payment yearfrac: %.8f\n", paymentDatesY(end));
+
+%% ========================================================
+%  5. Compute ATM strike from OIS curve
+% =========================================================
+
+zc = G2PP.getInitialMarketZC([expiryY, paymentDatesY]);
+zc = zc(:);
+
+P0T0 = zc(1);
+P0Ti = zc(2:end);
+
+delta = diff([expiryY; paymentDatesY(:)]);
+annuity = sum(delta .* P0Ti);
+
+atmStrike = (P0T0 - P0Ti(end)) / annuity;
+strike = max(atmStrike, 1e-8);
+
+notional = 1e6;
+
+fprintf("P0T0     = %.10f\n", P0T0);
+fprintf("Annuity  = %.10f\n", annuity);
+fprintf("ATM K    = %.10f\n", strike);
+
+assert(isfinite(strike) && strike > 0, "ATM strike must be finite and positive.");
+assert(isfinite(annuity) && annuity > 0, "Annuity must be finite and positive.");
+
+disp("Test 2 passed: ATM strike and annuity are valid.");
+
+%% ========================================================
+%  6. Yearfrac test: instrument and bond basket
+% =========================================================
+
+instrY = G2PP.getSwaptionInstrument( ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "direction", "PAY", ...
+    "notional", notional);
+
+basketY = G2PP.getSwaptionBondBasket(instrY.expiry, instrY.paymentDates);
+
+coeffs = instrY.coeffs(:);
+A0Ti = basketY.A0Ti(:);
+Bx = basketY.Bx0Ti(:);
+By = basketY.By0Ti(:);
+
+assert(numel(coeffs) == numel(paymentDatesY), "Wrong number of basket coefficients.");
+assert(numel(A0Ti) == numel(paymentDatesY), "Wrong number of A coefficients.");
+assert(numel(Bx) == numel(paymentDatesY), "Wrong number of Bx coefficients.");
+assert(numel(By) == numel(paymentDatesY), "Wrong number of By coefficients.");
+
+assert(all(coeffs > 0), "All c_i must be positive.");
+assert(all(A0Ti > 0), "All A(T,Ti) must be positive.");
+assert(all(Bx > 0), "All Bx(T,Ti) must be positive.");
+assert(all(By > 0), "All By(T,Ti) must be positive.");
+
+disp("Test 3 passed: yearfrac instrument and bond basket are valid.");
+
+%% ========================================================
+%  7. Yearfrac test: Gaussian state at expiry
+% =========================================================
+
+G = G2PP.getStateGaussianAtExpiry(expiryY);
+
+Sigma = G.covMatrix;
+eigVals = eig(Sigma);
+
+assert(all(isfinite(eigVals)), "Covariance eigenvalues must be finite.");
+assert(all(eigVals > -1e-12), "State covariance matrix is not positive semidefinite.");
+
+sigmaX = sqrt(G.varX);
+sigmaY = sqrt(G.varY);
+rhoXY = G.covXY / (sigmaX * sigmaY);
+
+assert(isfinite(rhoXY), "State correlation must be finite.");
+assert(abs(rhoXY) <= 1 + 1e-10, "State correlation must be inside [-1,1].");
+
+fprintf("muX    = %.10e\n", G.muX);
+fprintf("muY    = %.10e\n", G.muY);
+fprintf("sigmaX = %.10e\n", sigmaX);
+fprintf("sigmaY = %.10e\n", sigmaY);
+fprintf("rhoXY  = %.10f\n", rhoXY);
+
+disp("Test 4 passed: Gaussian state is valid.");
+
+%% ========================================================
+%  8. Yearfrac test: lambda and yBar
+% =========================================================
+
+xVal = G.muX;
+
+lambda = G2PP.getLambda(coeffs, A0Ti, Bx, xVal);
+
+assert(numel(lambda) == numel(By), "lambda and By must have the same length.");
+assert(all(lambda > 0), "All lambda_i must be positive.");
+
+yBar = G2PP.yBarSolver(coeffs, A0Ti, Bx, By, xVal);
+
+[resY, derivY] = G2PP.getYBarFunc(yBar, lambda, By);
+
+fprintf("yBar       = %.10e\n", yBar);
+fprintf("residual   = %.10e\n", resY);
+fprintf("derivative = %.10e\n", derivY);
+
+assert(isfinite(yBar), "yBar must be finite.");
+assert(abs(resY) < 1e-8, "yBar residual is too large.");
+assert(derivY > 0, "yBar equation derivative should be positive.");
+
+disp("Test 5 passed: lambda and yBar are valid.");
+
+%% ========================================================
+%  9. Yearfrac test: h1, h2, kappa consistency
+% =========================================================
+
+cond = G2PP.getConditionalYMoments(xVal, G);
+
+muYCond = cond.meanY;
+varYCond = cond.varY;
+sigmaYCond = cond.stdY;
+
+h1 = G2PP.h1Function(yBar, muYCond, sigmaYCond);
+h2 = G2PP.h2Function(h1, By, sigmaYCond);
+kappa = G2PP.kappaFunction(By, muYCond, varYCond);
+
+assert(isscalar(h1), "h1 must be scalar.");
+assert(numel(h2) == numel(By), "h2 must have one value per payment date.");
+assert(numel(kappa) == numel(By), "kappa must have one value per payment date.");
+assert(all(isfinite(h2)), "h2 must be finite.");
+assert(all(isfinite(kappa)), "kappa must be finite.");
+
+% Direct theorem check:
+% h1 = (yBar - muYCond) / sigmaYCond
+h1Direct = (yBar - muYCond) / sigmaYCond;
+
+assert(abs(h1 - h1Direct) < 1e-12, "h1 does not match conditional moment formula.");
+
+disp("Test 6 passed: h1, h2, and kappa are valid.");
+
+%% ========================================================
+%  10. Yearfrac test: Brigo integrand over z-grid
+% =========================================================
+
+omegaPAY = 1;
+
+zGrid = linspace(-6, 6, 41);
+
+integrandVals = G2PP.brigoSwaptionIntegrand( ...
+    zGrid, ...
+    omegaPAY, ...
+    coeffs, ...
+    A0Ti, ...
+    Bx, ...
+    By, ...
+    G);
+
+assert(all(isfinite(integrandVals)), "Integrand has non-finite values.");
+assert(all(integrandVals > -1e-12), "Payer integrand should be nonnegative up to tolerance.");
+
+fprintf("Integrand min = %.10e\n", min(integrandVals));
+fprintf("Integrand max = %.10e\n", max(integrandVals));
+
+disp("Test 7 passed: Brigo integrand is finite.");
+
+%% ========================================================
+%  11. Yearfrac test: price payer and receiver
+% =========================================================
+
+pricePAY_Y = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "PAY", ...
+    notional);
+
+priceREC_Y = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "REC", ...
+    notional);
+
+fprintf("Yearfrac payer price    = %.10f\n", pricePAY_Y);
+fprintf("Yearfrac receiver price = %.10f\n", priceREC_Y);
+
+assert(isfinite(pricePAY_Y), "Yearfrac payer price must be finite.");
+assert(isfinite(priceREC_Y), "Yearfrac receiver price must be finite.");
+assert(pricePAY_Y >= -1e-8, "Yearfrac payer price must be nonnegative.");
+assert(priceREC_Y >= -1e-8, "Yearfrac receiver price must be nonnegative.");
+
+disp("Test 8 passed: yearfrac prices are finite and nonnegative.");
+
+%% ========================================================
+%  12. Yearfrac test: payer-receiver parity
+% =========================================================
+
+parityLHS = pricePAY_Y - priceREC_Y;
+parityRHS = notional * (basketY.P0T0 - sum(coeffs .* basketY.P0Ti(:)));
+
+parityError = parityLHS - parityRHS;
+parityScale = max(1, abs(pricePAY_Y) + abs(priceREC_Y) + abs(parityRHS));
+
+fprintf("Parity LHS   = %.10f\n", parityLHS);
+fprintf("Parity RHS   = %.10f\n", parityRHS);
+fprintf("Parity error = %.10e\n", parityError);
+
+assert(abs(parityError) / parityScale < 1e-5, "Payer-receiver parity failed.");
+
+disp("Test 9 passed: payer-receiver parity holds.");
+
+%% ========================================================
+%  13. Date-input test: same swaption, date arguments
+% =========================================================
+
+pricePAY_Date = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryDate, ...
+    paymentDatesDate, ...
+    "PAY", ...
+    notional);
+
+priceREC_Date = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryDate, ...
+    paymentDatesDate, ...
+    "REC", ...
+    notional);
+
+fprintf("Date payer price    = %.10f\n", pricePAY_Date);
+fprintf("Date receiver price = %.10f\n", priceREC_Date);
+
+assert(isfinite(pricePAY_Date), "Date payer price must be finite.");
+assert(isfinite(priceREC_Date), "Date receiver price must be finite.");
+
+priceScalePAY = max(1, abs(pricePAY_Y));
+priceScaleREC = max(1, abs(priceREC_Y));
+
+relDiffPAY = abs(pricePAY_Date - pricePAY_Y) / priceScalePAY;
+relDiffREC = abs(priceREC_Date - priceREC_Y) / priceScaleREC;
+
+fprintf("Relative diff payer    = %.10e\n", relDiffPAY);
+fprintf("Relative diff receiver = %.10e\n", relDiffREC);
+
+assert(relDiffPAY < 1e-6, "Date and yearfrac payer prices are inconsistent.");
+assert(relDiffREC < 1e-6, "Date and yearfrac receiver prices are inconsistent.");
+
+disp("Test 10 passed: date and yearfrac pricing are consistent.");
+
+%% ========================================================
+%  14. Strike monotonicity sanity check
+% =========================================================
+
+KLow = max(strike - 0.0025, 1e-8);
+KHigh = strike + 0.0025;
+
+pricePAY_LowK = localPriceSwaptionG2PP( ...
+    G2PP, KLow, expiryY, paymentDatesY, "PAY", notional);
+
+pricePAY_HighK = localPriceSwaptionG2PP( ...
+    G2PP, KHigh, expiryY, paymentDatesY, "PAY", notional);
+
+priceREC_LowK = localPriceSwaptionG2PP( ...
+    G2PP, KLow, expiryY, paymentDatesY, "REC", notional);
+
+priceREC_HighK = localPriceSwaptionG2PP( ...
+    G2PP, KHigh, expiryY, paymentDatesY, "REC", notional);
+
+fprintf("Payer low K     = %.10f\n", pricePAY_LowK);
+fprintf("Payer high K    = %.10f\n", pricePAY_HighK);
+fprintf("Receiver low K  = %.10f\n", priceREC_LowK);
+fprintf("Receiver high K = %.10f\n", priceREC_HighK);
+
+assert(pricePAY_LowK >= pricePAY_HighK - 1e-8, ...
+    "Payer price should decrease with strike.");
+
+assert(priceREC_LowK <= priceREC_HighK + 1e-8, ...
+    "Receiver price should increase with strike.");
+
+disp("Test 11 passed: strike monotonicity holds.");
+
+%% ========================================================
+%  15. Final status
+% =========================================================
+
+disp("========================================================");
+disp("All G2++ swaption pricing tests passed.");
+disp("The next step is calibration on a small swaption matrix.");
+disp("========================================================");
+
+%% ========================================================
+%  Local helper: supports both possible method names
+% =========================================================
+
+function price = localPriceSwaptionG2PP(G2PP, strike, expiry, paymentDates, direction, notional)
+
+    availableMethods = string(methods(G2PP));
+
+    if any(availableMethods == "priceSwaptionG2PP")
+
+        price = G2PP.priceSwaptionG2PP( ...
+            strike, ...
+            expiry, ...
+            paymentDates, ...
+            "direction", char(direction), ...
+            "notional", notional);
+
+    elseif any(availableMethods == "getSwaptionPriceG2PP")
+
+        price = G2PP.getSwaptionPriceG2PP( ...
+            strike, ...
+            expiry, ...
+            paymentDates, ...
+            "direction", char(direction), ...
+            "notional", notional);
+
+    else
+        error("No G2++ swaption pricing method found.");
+    end
+end
+
 
 ---
