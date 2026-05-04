@@ -325,16 +325,19 @@ end
 
 ```matlab
 function output = brigoSwaptionIntegrand(obj, z, omega, coeffs, A0Ti, Bx, By, gaussianState)
-    % Brigo G2++ swaption integrand using standardized normal variable z.
+    % Brigo G2++ swaption integrand after change of variable:
     %
-    % x = muX + sigmaX * z
+    %     x = muX + sigmaX*z,     z ~ N(0,1)
     %
-    % Integrand:
+    % Original:
     %
-    % omega * [
-    %     Phi(-omega*h1)
-    %     - sum_i lambda_i(x) * exp(kappa_i(x)) * Phi(-omega*h2_i)
-    % ] * phi(z)
+    %     integral G(x) f_X(x) dx
+    %
+    % After change of variable:
+    %
+    %     integral G(muX + sigmaX*z) phi(z) dz
+    %
+    % No extra sigmaX multiplier appears.
 
     arguments
         obj (1,1) GaussianTwoFactors;
@@ -350,26 +353,37 @@ function output = brigoSwaptionIntegrand(obj, z, omega, coeffs, A0Ti, Bx, By, ga
     z = z(:).';
     output = zeros(size(z));
 
-    muX = gaussianState.muX;
-    varX = gaussianState.varX;
-
-    sigmaX = sqrt(varX);
-
-    if sigmaX <= 0
-        error("sigmaX must be strictly positive.");
-    end
-
     coeffs = coeffs(:);
     A0Ti = A0Ti(:);
     Bx = Bx(:);
     By = By(:);
 
+    muX = gaussianState.muX;
+    muY = gaussianState.muY;
+    varX = gaussianState.varX;
+    varY = gaussianState.varY;
+    covXY = gaussianState.covXY;
+
+    if varX <= 0
+        error("varX must be strictly positive.");
+    end
+
+    sigmaX = sqrt(varX);
+
+    % Conditional variance of Y | X=x. Constant with respect to x.
+    varYCond = varY - (covXY^2 / varX);
+    varYCond = max(varYCond, 0);
+    sigmaYCond = sqrt(varYCond);
+
     for j = 1:numel(z)
 
+        % Change of variable: x = muX + sigmaX*z
         xVal = muX + sigmaX * z(j);
 
-        lambda = coeffs .* A0Ti .* exp(-Bx .* xVal);
+        % lambda_i(x)
+        lambda = obj.getLambda(coeffs, A0Ti, Bx, xVal);
 
+        % Solve boundary yBar(x)
         yBar = obj.yBarSolverFromLambda(lambda, By);
 
         if ~isfinite(yBar)
@@ -377,11 +391,8 @@ function output = brigoSwaptionIntegrand(obj, z, omega, coeffs, A0Ti, Bx, By, ga
             continue;
         end
 
-        cond = obj.getConditionalYMoments(xVal, gaussianState);
-
-        muYCond = cond.meanY;
-        varYCond = cond.varY;
-        sigmaYCond = cond.stdY;
+        % Conditional mean E[Y | X = x]
+        muYCond = muY + (covXY / varX) * (xVal - muX);
 
         if sigmaYCond <= 0
             basketVal = sum(lambda .* exp(-By .* muYCond));
@@ -396,13 +407,16 @@ function output = brigoSwaptionIntegrand(obj, z, omega, coeffs, A0Ti, Bx, By, ga
             continue;
         end
 
+        % Brigo objects
         h1 = obj.h1Function(yBar, muYCond, sigmaYCond);
         h2 = obj.h2Function(h1, By, sigmaYCond);
         kappa = obj.kappaFunction(By, muYCond, varYCond);
 
+        % Brigo bracket
         bracket = normcdf(-omega .* h1) ...
                 - sum(lambda .* exp(kappa) .* normcdf(-omega .* h2));
 
+        % Standard-normal integration density
         output(j) = omega .* bracket .* normpdf(z(j));
     end
 end
