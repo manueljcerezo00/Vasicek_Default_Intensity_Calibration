@@ -1,0 +1,1552 @@
+# G2++ Model Due Diligence
+
+
+Yes. Better format:
+
+1. **No LaTeX escaping.**
+2. **One function per block.**
+3. **Each block is copy-pasteable MATLAB.**
+4. **Header says where it goes: inside class or separate `.m` file.**
+
+The methods below start at `getLambdaAndBy` and continue through calibration. They assume the upstream G2++ class already has the bucket, variance, bond-basket, and forward-measure methods we audited from your current class file. `% Gaussian Two-Fator Model aka G2++.txt`
+
+---
+
+# Annex A.1 - `getLambdaAndBy`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function [lambda, By] = getLambdaAndBy(obj, strike, currMaturity, ulSwapSteps, x_state, args)
+    % Returns:
+    %
+    %     lambda_i(x) = c_i * A(T0,Ti) * exp(-Bx(T0,Ti)*x)
+    %
+    % and:
+    %
+    %     By_i = B(b,T0,Ti)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        x_state (1,1) double = 0;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    instr = obj.getSwaptionInstrument( ...
+        strike, currMaturity, ulSwapSteps, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    basket = obj.getSwaptionBondBasket(currMaturity, ulSwapSteps);
+
+    coeffs = instr.coeffs(:);
+    A0Ti = basket.A0Ti(:);
+    Bx0Ti = basket.Bx0Ti(:);
+    By0Ti = basket.By0Ti(:);
+
+    lambda = coeffs .* A0Ti .* exp(-Bx0Ti .* x_state);
+    By = By0Ti;
+end
+```
+
+---
+
+# Annex A.2 - `getYBarValue`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function value = getYBarValue(obj, y, lambda, By)
+    % Scalar equation for yBar:
+    %
+    %     f(y) = 1 - sum_i lambda_i(x) * exp(-By_i * y)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        y (1,1) double;
+        lambda (:,1) double;
+        By (:,1) double;
+    end
+
+    value = 1 - sum(lambda .* exp(-By .* y));
+end
+```
+
+---
+
+# Annex A.3 - `yBarSolverFromLambda`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function yBar = yBarSolverFromLambda(obj, lambda, By, args)
+    % Solves for yBar(x):
+    %
+    %     1 = sum_i lambda_i(x) * exp(-By_i * yBar)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        lambda (:,1) double;
+        By (:,1) double;
+        args.ySeed (1,1) double = 0;
+        args.maxExpansion (1,1) double = 30;
+        args.tolerance (1,1) double = 1e-10;
+    end
+
+    lambda = lambda(:);
+    By = By(:);
+
+    scalarF = @(y) obj.getYBarValue(y, lambda, By);
+
+    yLow = args.ySeed - 0.01;
+    yHigh = args.ySeed + 0.01;
+
+    fLow = scalarF(yLow);
+    fHigh = scalarF(yHigh);
+
+    expansion = 0;
+
+    while fLow * fHigh > 0 && expansion < args.maxExpansion
+        width = yHigh - yLow;
+
+        yLow = yLow - 2 * width;
+        yHigh = yHigh + 2 * width;
+
+        fLow = scalarF(yLow);
+        fHigh = scalarF(yHigh);
+
+        expansion = expansion + 1;
+    end
+
+    if fLow * fHigh > 0
+        yBar = NaN;
+        return;
+    end
+
+    yBar = fzero(scalarF, [yLow, yHigh]);
+
+    residual = scalarF(yBar);
+
+    if ~isfinite(yBar) || abs(residual) > args.tolerance
+        yBar = NaN;
+    end
+end
+```
+
+---
+
+# Annex A.4 - `yBarSolver`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function yBar = yBarSolver(obj, strike, currMaturity, ulSwapSteps, x_state, args)
+    % Wrapper around yBarSolverFromLambda using instrument inputs.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        x_state (1,1) double = 0;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+        args.ySeed (1,1) double = 0;
+    end
+
+    [lambda, By] = obj.getLambdaAndBy( ...
+        strike, currMaturity, ulSwapSteps, x_state, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    yBar = obj.yBarSolverFromLambda(lambda, By, 'ySeed', args.ySeed);
+end
+```
+
+---
+
+# Annex A.5 - `h1Function`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function h1 = h1Function(obj, yBar, muYCond, sigmaYCond)
+    % Brigo h1:
+    %
+    %     h1(x) = (yBar(x) - E[Y|X=x]) / Std[Y|X=x]
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        yBar (1,1) double;
+        muYCond (1,1) double;
+        sigmaYCond (1,1) double {mustBeNonnegative};
+    end
+
+    if sigmaYCond <= 0
+        error("sigmaYCond must be strictly positive.");
+    end
+
+    h1 = (yBar - muYCond) ./ sigmaYCond;
+end
+```
+
+---
+
+# Annex A.6 - `h2Function`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function h2 = h2Function(obj, h1, By, sigmaYCond)
+    % Brigo h2:
+    %
+    %     h2_i(x) = h1(x) + By_i * Std[Y|X=x]
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        h1 (1,1) double;
+        By (:,1) double;
+        sigmaYCond (1,1) double {mustBeNonnegative};
+    end
+
+    h2 = h1 + By(:) .* sigmaYCond;
+end
+```
+
+---
+
+# Annex A.7 - `kappaFunction`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function kappa = kappaFunction(obj, By, muYCond, varYCond)
+    % Brigo kappa_i(x):
+    %
+    %     kappa_i(x) = -By_i * muYCond + 0.5 * By_i^2 * varYCond
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        By (:,1) double;
+        muYCond (1,1) double;
+        varYCond (1,1) double {mustBeNonnegative};
+    end
+
+    By = By(:);
+
+    kappa = -By .* muYCond + 0.5 .* (By.^2) .* varYCond;
+end
+```
+
+---
+
+# Annex A.8 - `getStateGaussianAtExpiry`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function output = getStateGaussianAtExpiry(obj, currMaturity)
+    % Computes the Gaussian law of (x(T0), y(T0)) under the T0-forward measure.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        currMaturity (1,1) double;
+    end
+
+    T0 = currMaturity;
+
+    muX = obj.muTForward(0, T0, ...
+        'process', 'x_process', ...
+        'tMaturity', T0);
+
+    muY = obj.muTForward(0, T0, ...
+        'process', 'y_process', ...
+        'tMaturity', T0);
+
+    varX = obj.varTForward(0, T0, 'process', 'x_process');
+    varY = obj.varTForward(0, T0, 'process', 'y_process');
+    covXY = obj.covTForward(0, T0);
+
+    covMatrix = [varX, covXY; covXY, varY];
+
+    output.muX = muX;
+    output.muY = muY;
+    output.varX = varX;
+    output.varY = varY;
+    output.covXY = covXY;
+    output.covMatrix = covMatrix;
+end
+```
+
+---
+
+# Annex A.9 - `getConditionalYMoments`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function output = getConditionalYMoments(obj, xVal, gaussianState)
+    % Computes conditional moments of Y given X = xVal.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        xVal (1,1) double;
+        gaussianState (1,1) struct;
+    end
+
+    varX = gaussianState.varX;
+    varY = gaussianState.varY;
+    covXY = gaussianState.covXY;
+
+    if varX <= 0
+        error("varX must be strictly positive for conditional Gaussian formula.");
+    end
+
+    condMeanY = gaussianState.muY + (covXY / varX) * (xVal - gaussianState.muX);
+    condVarY = varY - (covXY^2 / varX);
+
+    condVarY = max(condVarY, 0);
+
+    output.meanY = condMeanY;
+    output.varY = condVarY;
+    output.stdY = sqrt(condVarY);
+end
+```
+
+---
+
+# Annex A.10 - `brigoSwaptionIntegrand`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function output = brigoSwaptionIntegrand(obj, z, omega, coeffs, A0Ti, Bx, By, gaussianState)
+    % Brigo G2++ swaption integrand after change of variable:
+    %
+    %     x = muX + sigmaX*z,     z ~ N(0,1)
+    %
+    % Original:
+    %
+    %     integral G(x) f_X(x) dx
+    %
+    % After change of variable:
+    %
+    %     integral G(muX + sigmaX*z) phi(z) dz
+    %
+    % No extra sigmaX multiplier appears.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        z double;
+        omega (1,1) double {mustBeMember(omega, [-1, 1])};
+        coeffs (:,1) double;
+        A0Ti (:,1) double;
+        Bx (:,1) double;
+        By (:,1) double;
+        gaussianState (1,1) struct;
+    end
+
+    z = z(:).';
+    output = zeros(size(z));
+
+    coeffs = coeffs(:);
+    A0Ti = A0Ti(:);
+    Bx = Bx(:);
+    By = By(:);
+
+    muX = gaussianState.muX;
+    muY = gaussianState.muY;
+    varX = gaussianState.varX;
+    varY = gaussianState.varY;
+    covXY = gaussianState.covXY;
+
+    if varX <= 0
+        error("varX must be strictly positive.");
+    end
+
+    sigmaX = sqrt(varX);
+
+    % Conditional variance of Y | X=x. Constant with respect to x.
+    varYCond = varY - (covXY^2 / varX);
+    varYCond = max(varYCond, 0);
+    sigmaYCond = sqrt(varYCond);
+
+    for j = 1:numel(z)
+
+        % Change of variable: x = muX + sigmaX*z
+        xVal = muX + sigmaX * z(j);
+
+        % lambda_i(x)
+        lambda = obj.getLambda(coeffs, A0Ti, Bx, xVal);
+
+        % Solve boundary yBar(x)
+        yBar = obj.yBarSolverFromLambda(lambda, By);
+
+        if ~isfinite(yBar)
+            output(j) = NaN;
+            continue;
+        end
+
+        % Conditional mean E[Y | X = x]
+        muYCond = muY + (covXY / varX) * (xVal - muX);
+
+        if sigmaYCond <= 0
+            basketVal = sum(lambda .* exp(-By .* muYCond));
+
+            if omega == 1
+                condPayoff = max(1 - basketVal, 0);
+            else
+                condPayoff = max(basketVal - 1, 0);
+            end
+
+            output(j) = condPayoff * normpdf(z(j));
+            continue;
+        end
+
+        % Brigo objects
+        h1 = obj.h1Function(yBar, muYCond, sigmaYCond);
+        h2 = obj.h2Function(h1, By, sigmaYCond);
+        kappa = obj.kappaFunction(By, muYCond, varYCond);
+
+        % Brigo bracket
+        bracket = normcdf(-omega .* h1) ...
+                - sum(lambda .* exp(kappa) .* normcdf(-omega .* h2));
+
+        % Standard-normal integration density
+        output(j) = omega .* bracket .* normpdf(z(j));
+    end
+end
+```
+
+---
+
+# Annex A.11 - `priceSwaptionG2PP`
+
+**Location:** inside `GaussianTwoFactors.m`, inside `methods`.
+
+```matlab
+function price = priceSwaptionG2PP(obj, strike, currMaturity, ulSwapSteps, args)
+    % Prices a European swaption under G2++ using Brigo's explicit
+    % one-dimensional integral.
+    %
+    % Convention:
+    %   omega =  1 for payer
+    %   omega = -1 for receiver
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+        args.integrationLower (1,1) double = -8;
+        args.integrationUpper (1,1) double = 8;
+        args.absTol (1,1) double = 1e-10;
+        args.relTol (1,1) double = 1e-8;
+    end
+
+    if strcmpi(args.direction, 'PAY')
+        omega = 1;
+    else
+        omega = -1;
+    end
+
+    instr = obj.getSwaptionInstrument( ...
+        strike, currMaturity, ulSwapSteps, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    basket = obj.getSwaptionBondBasket(instr.expiry, instr.paymentDates);
+
+    gaussianState = obj.getStateGaussianAtExpiry(instr.expiry);
+
+    coeffs = instr.coeffs(:);
+    A0Ti = basket.A0Ti(:);
+    Bx = basket.Bx0Ti(:);
+    By = basket.By0Ti(:);
+
+    integrand = @(z) obj.brigoSwaptionIntegrand( ...
+        z, omega, coeffs, A0Ti, Bx, By, gaussianState);
+
+    expectation = integral( ...
+        integrand, ...
+        args.integrationLower, ...
+        args.integrationUpper, ...
+        'ArrayValued', true, ...
+        'AbsTol', args.absTol, ...
+        'RelTol', args.relTol);
+
+    price = instr.notional .* basket.P0T0 .* expectation;
+
+    if ~isfinite(price)
+        price = NaN;
+    end
+end
+```
+
+---
+
+# Annex B.1 - `buildSwaptionCalibrationSet.m`
+
+**Location:** separate file named `buildSwaptionCalibrationSet.m`.
+
+```matlab
+function calibSet = buildSwaptionCalibrationSet(expiries, tenors, quotes, args)
+% Builds a flat calibration set from a swaption quote matrix.
+
+    arguments
+        expiries (1,:) double
+        tenors (1,:) double
+        quotes (:,:) double
+        args.quoteType (1,:) char {mustBeMember(args.quoteType, {'price','black','normal'})} = 'price'
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY'
+        args.notional (1,1) double = 1.0
+        args.strikeConvention (1,:) char {mustBeMember(args.strikeConvention, {'ATM','fixed'})} = 'ATM'
+        args.fixedStrike (1,1) double = NaN
+        args.paymentFrequency (1,1) double {mustBePositive} = 1
+        args.weight (:,:) double = []
+    end
+
+    nExp = numel(expiries);
+    nTenor = numel(tenors);
+
+    if size(quotes,1) ~= nExp || size(quotes,2) ~= nTenor
+        error("quotes must have size numel(expiries) x numel(tenors).");
+    end
+
+    if isempty(args.weight)
+        weights = ones(nExp, nTenor);
+    else
+        weights = args.weight;
+        if any(size(weights) ~= size(quotes))
+            error("weight must have the same size as quotes.");
+        end
+    end
+
+    if strcmpi(args.strikeConvention, 'fixed') && ~isfinite(args.fixedStrike)
+        error("fixedStrike must be provided when strikeConvention = 'fixed'.");
+    end
+
+    k = 0;
+    calibSet = struct([]);
+
+    for i = 1:nExp
+        expiry = expiries(i);
+
+        for j = 1:nTenor
+            tenor = tenors(j);
+            quote = quotes(i,j);
+
+            if ~isfinite(quote)
+                continue;
+            end
+
+            dt = 1 / args.paymentFrequency;
+            nPayments = round(tenor * args.paymentFrequency);
+
+            paymentDates = expiry + (1:nPayments) .* dt;
+
+            k = k + 1;
+
+            calibSet(k).expiry = expiry;
+            calibSet(k).tenor = tenor;
+            calibSet(k).paymentDates = paymentDates;
+            calibSet(k).quote = quote;
+            calibSet(k).quoteType = args.quoteType;
+            calibSet(k).direction = args.direction;
+            calibSet(k).notional = args.notional;
+            calibSet(k).strikeConvention = args.strikeConvention;
+            calibSet(k).fixedStrike = args.fixedStrike;
+            calibSet(k).weight = weights(i,j);
+        end
+    end
+end
+```
+
+---
+
+# Annex B.2 - `getSwaptionForwardAndAnnuityG2PP.m`
+
+**Location:** separate file named `getSwaptionForwardAndAnnuityG2PP.m`.
+
+```matlab
+function [forwardSwapRate, annuity, delta, P0T0, P0Ti] = ...
+    getSwaptionForwardAndAnnuityG2PP(model, expiry, paymentDates)
+% Computes single-curve forward swap rate and annuity.
+
+    arguments
+        model (1,1) GaussianTwoFactors
+        expiry (1,1) double
+        paymentDates (1,:) double
+    end
+
+    paymentDates = paymentDates(:);
+
+    zc = model.getInitialMarketZC([expiry, paymentDates.']);
+    zc = zc(:);
+
+    P0T0 = zc(1);
+    P0Ti = zc(2:end);
+
+    delta = diff([expiry; paymentDates]);
+
+    annuity = sum(delta .* P0Ti);
+
+    forwardSwapRate = (P0T0 - P0Ti(end)) / annuity;
+end
+```
+
+---
+
+# Annex B.3 - `swaptionPriceFromVol.m`
+
+**Location:** separate file named `swaptionPriceFromVol.m`.
+
+```matlab
+function price = swaptionPriceFromVol(F, K, T, annuity, vol, volType, direction, notional)
+% Converts quoted normal or Black volatility into a swaption price.
+
+    arguments
+        F (1,1) double
+        K (1,1) double
+        T (1,1) double {mustBeNonnegative}
+        annuity (1,1) double {mustBeNonnegative}
+        vol (1,1) double {mustBeNonnegative}
+        volType (1,:) char {mustBeMember(volType, {'normal','black'})}
+        direction (1,:) char {mustBeMember(direction, {'PAY','REC'})} = 'PAY'
+        notional (1,1) double = 1.0
+    end
+
+    omega = 1;
+    if strcmpi(direction, 'REC')
+        omega = -1;
+    end
+
+    if T == 0 || vol == 0
+        intrinsic = max(omega * (F - K), 0);
+        price = notional * annuity * intrinsic;
+        return;
+    end
+
+    sqrtT = sqrt(T);
+
+    switch lower(volType)
+
+        case 'normal'
+            std = vol * sqrtT;
+            d = (F - K) / std;
+
+            price = notional * annuity * ...
+                (omega * (F - K) * normcdf(omega * d) + std * normpdf(d));
+
+        case 'black'
+            if F <= 0 || K <= 0
+                error('Black volatility requires strictly positive F and K.');
+            end
+
+            std = vol * sqrtT;
+            d1 = (log(F / K) + 0.5 * std^2) / std;
+            d2 = d1 - std;
+
+            price = notional * annuity * ...
+                omega * (F * normcdf(omega * d1) - K * normcdf(omega * d2));
+    end
+end
+```
+
+---
+
+# Annex B.4 - `swaptionImpliedVolFromPrice.m`
+
+**Location:** separate file named `swaptionImpliedVolFromPrice.m`.
+
+```matlab
+function impVol = swaptionImpliedVolFromPrice(price, F, K, T, annuity, volType, direction, notional)
+% Computes implied normal or Black volatility from a swaption price.
+
+    arguments
+        price (1,1) double {mustBeNonnegative}
+        F (1,1) double
+        K (1,1) double
+        T (1,1) double {mustBeNonnegative}
+        annuity (1,1) double {mustBeNonnegative}
+        volType (1,:) char {mustBeMember(volType, {'normal','black'})}
+        direction (1,:) char {mustBeMember(direction, {'PAY','REC'})} = 'PAY'
+        notional (1,1) double = 1.0
+    end
+
+    omega = 1;
+    if strcmpi(direction, 'REC')
+        omega = -1;
+    end
+
+    intrinsic = notional * annuity * max(omega * (F - K), 0);
+
+    if price < intrinsic - 1e-12
+        impVol = NaN;
+        return;
+    end
+
+    if abs(price - intrinsic) < 1e-14
+        impVol = 0;
+        return;
+    end
+
+    objFun = @(v) swaptionPriceFromVol( ...
+        F, K, T, annuity, v, volType, direction, notional) - price;
+
+    switch lower(volType)
+
+        case 'normal'
+            volLow = 1e-10;
+            volHigh = 5.0;
+
+        case 'black'
+            if F <= 0 || K <= 0
+                impVol = NaN;
+                return;
+            end
+            volLow = 1e-10;
+            volHigh = 5.0;
+    end
+
+    while objFun(volHigh) < 0
+        volHigh = 2 * volHigh;
+
+        if volHigh > 100
+            impVol = NaN;
+            return;
+        end
+    end
+
+    impVol = fzero(objFun, [volLow, volHigh]);
+end
+```
+
+---
+
+# Annex B.5 - `getCalibrationStrikeG2PP.m`
+
+**Location:** separate file named `getCalibrationStrikeG2PP.m`.
+
+```matlab
+function K = getCalibrationStrikeG2PP(model, instr)
+% Returns fixed or ATM strike for one calibration instrument.
+
+    arguments
+        model (1,1) GaussianTwoFactors
+        instr (1,1) struct
+    end
+
+    [F, ~] = getSwaptionForwardAndAnnuityG2PP( ...
+        model, instr.expiry, instr.paymentDates);
+
+    if strcmpi(instr.strikeConvention, 'ATM')
+        K = F;
+    else
+        K = instr.fixedStrike;
+    end
+end
+```
+
+---
+
+# Annex B.6 - `swaptionMarketPriceFromQuote.m`
+
+**Location:** separate file named `swaptionMarketPriceFromQuote.m`.
+
+```matlab
+function marketPrice = swaptionMarketPriceFromQuote(model, instr)
+% Converts a market quote into a market swaption price.
+
+    arguments
+        model (1,1) GaussianTwoFactors
+        instr (1,1) struct
+    end
+
+    [F, A] = getSwaptionForwardAndAnnuityG2PP( ...
+        model, instr.expiry, instr.paymentDates);
+
+    if strcmpi(instr.strikeConvention, 'ATM')
+        K = F;
+    else
+        K = instr.fixedStrike;
+    end
+
+    switch lower(instr.quoteType)
+
+        case 'price'
+            marketPrice = instr.notional * instr.quote;
+
+        case {'normal','black'}
+            marketPrice = swaptionPriceFromVol( ...
+                F, K, instr.expiry, A, instr.quote, instr.quoteType, ...
+                instr.direction, instr.notional);
+
+        otherwise
+            error("Unsupported quote type.");
+    end
+end
+```
+
+---
+
+# Annex B.7 - `g2ppInverseTransformBrigo5.m`
+
+**Location:** separate file named `g2ppInverseTransformBrigo5.m`.
+
+```matlab
+function thetaRaw = g2ppInverseTransformBrigo5(a, b, sigma, eta, rho)
+% Maps admissible five-parameter G2++ parameters to unconstrained variables.
+
+    arguments
+        a (1,1) double {mustBePositive}
+        b (1,1) double {mustBePositive}
+        sigma (1,1) double {mustBePositive}
+        eta (1,1) double {mustBePositive}
+        rho (1,1) double
+    end
+
+    if abs(rho) >= 1
+        error("rho must satisfy abs(rho) < 1.");
+    end
+
+    thetaRaw = [
+        log(a);
+        log(b);
+        log(sigma);
+        log(eta);
+        atanh(rho)
+    ];
+end
+```
+
+---
+
+# Annex B.8 - `g2ppApplyTransformBrigo5.m`
+
+**Location:** separate file named `g2ppApplyTransformBrigo5.m`.
+
+```matlab
+function params = g2ppApplyTransformBrigo5(model, thetaRaw)
+% Applies five-parameter constant-vol G2++ calibration to the model.
+%
+% thetaRaw = [log(a); log(b); log(sigma); log(eta); atanh(rho)]
+
+    arguments
+        model (1,1) GaussianTwoFactors
+        thetaRaw (5,1) double
+    end
+
+    params.a = exp(thetaRaw(1));
+    params.b = exp(thetaRaw(2));
+    params.sigma = exp(thetaRaw(3));
+    params.eta = exp(thetaRaw(4));
+    params.rho = tanh(thetaRaw(5));
+
+    model.meanReversion_x = params.a;
+    model.meanReversion_y = params.b;
+    model.correlation = params.rho;
+
+    nSigma = numel(model.volatility_sigma);
+    nEta = numel(model.volatility_eta);
+
+    if nSigma == 0 || nEta == 0
+        error("model.volatility_sigma and model.volatility_eta must be initialized before calibration.");
+    end
+
+    model.volatility_sigma = params.sigma .* ones(1, nSigma);
+    model.volatility_eta = params.eta .* ones(1, nEta);
+end
+```
+
+---
+
+# Annex B.9 - `g2ppCalibrationResiduals.m`
+
+**Location:** separate file named `g2ppCalibrationResiduals.m`.
+
+```matlab
+function [residuals, diagnostics] = g2ppCalibrationResiduals(thetaRaw, model, calibSet, args)
+% Residual vector for five-parameter constant-vol G2++ calibration.
+
+    arguments
+        thetaRaw (5,1) double
+        model (1,1) GaussianTwoFactors
+        calibSet (1,:) struct
+        args.objectiveType (1,:) char {mustBeMember(args.objectiveType, {'price','normalizedPrice','vol'})} = 'normalizedPrice'
+        args.volTypeForDiagnostics (1,:) char {mustBeMember(args.volTypeForDiagnostics, {'normal','black'})} = 'normal'
+        args.badValuePenalty (1,1) double = 1e6
+    end
+
+    params = g2ppApplyTransformBrigo5(model, thetaRaw);
+
+    n = numel(calibSet);
+    residuals = zeros(n,1);
+
+    diagnostics.modelPrice = NaN(n,1);
+    diagnostics.marketPrice = NaN(n,1);
+    diagnostics.modelVol = NaN(n,1);
+    diagnostics.marketVol = NaN(n,1);
+    diagnostics.strike = NaN(n,1);
+    diagnostics.forward = NaN(n,1);
+    diagnostics.annuity = NaN(n,1);
+    diagnostics.expiry = NaN(n,1);
+    diagnostics.tenor = NaN(n,1);
+    diagnostics.params = params;
+
+    for k = 1:n
+        instr = calibSet(k);
+
+        try
+            K = getCalibrationStrikeG2PP(model, instr);
+
+            [F, A] = getSwaptionForwardAndAnnuityG2PP( ...
+                model, instr.expiry, instr.paymentDates);
+
+            marketPrice = swaptionMarketPriceFromQuote(model, instr);
+
+            modelPrice = model.priceSwaptionG2PP( ...
+                K, instr.expiry, instr.paymentDates, ...
+                'direction', instr.direction, ...
+                'notional', instr.notional);
+
+            diagnostics.modelPrice(k) = modelPrice;
+            diagnostics.marketPrice(k) = marketPrice;
+            diagnostics.strike(k) = K;
+            diagnostics.forward(k) = F;
+            diagnostics.annuity(k) = A;
+            diagnostics.expiry(k) = instr.expiry;
+
+            if isfield(instr, 'tenor')
+                diagnostics.tenor(k) = instr.tenor;
+            end
+
+            if isfield(instr, 'quote') && any(strcmpi(instr.quoteType, {'normal','black'}))
+                diagnostics.marketVol(k) = instr.quote;
+            end
+
+            switch args.objectiveType
+
+                case 'price'
+                    residuals(k) = sqrt(instr.weight) * (modelPrice - marketPrice);
+
+                case 'normalizedPrice'
+                    scale = max(instr.notional * A, 1e-12);
+                    residuals(k) = sqrt(instr.weight) * (modelPrice - marketPrice) / scale;
+
+                case 'vol'
+                    modelVol = swaptionImpliedVolFromPrice( ...
+                        modelPrice, F, K, instr.expiry, A, ...
+                        args.volTypeForDiagnostics, instr.direction, instr.notional);
+
+                    diagnostics.modelVol(k) = modelVol;
+
+                    if isfield(instr, 'quote') && strcmpi(instr.quoteType, args.volTypeForDiagnostics)
+                        marketVol = instr.quote;
+                    else
+                        marketVol = swaptionImpliedVolFromPrice( ...
+                            marketPrice, F, K, instr.expiry, A, ...
+                            args.volTypeForDiagnostics, instr.direction, instr.notional);
+                    end
+
+                    diagnostics.marketVol(k) = marketVol;
+
+                    if ~isfinite(modelVol) || ~isfinite(marketVol)
+                        residuals(k) = args.badValuePenalty;
+                    else
+                        residuals(k) = sqrt(instr.weight) * (modelVol - marketVol);
+                    end
+            end
+
+            if ~isfinite(residuals(k))
+                residuals(k) = args.badValuePenalty;
+            end
+
+        catch
+            residuals(k) = args.badValuePenalty;
+        end
+    end
+end
+```
+
+---
+
+# Annex B.10 - `calibrateG2PPToSwaptionSet.m`
+
+**Location:** separate file named `calibrateG2PPToSwaptionSet.m`.
+
+```matlab
+function result = calibrateG2PPToSwaptionSet(model, calibSet, theta0Raw, args)
+% Calibrates five-parameter constant-vol G2++ model to a swaption set.
+
+    arguments
+        model (1,1) GaussianTwoFactors
+        calibSet (1,:) struct
+        theta0Raw (5,1) double
+        args.objectiveType (1,:) char {mustBeMember(args.objectiveType, {'price','normalizedPrice','vol'})} = 'normalizedPrice'
+        args.volTypeForDiagnostics (1,:) char {mustBeMember(args.volTypeForDiagnostics, {'normal','black'})} = 'normal'
+        args.maxIterations (1,1) double = 200
+        args.display (1,:) char = 'iter'
+        args.useLsqnonlin (1,1) logical = true
+    end
+
+    residualFun = @(theta) g2ppCalibrationResiduals( ...
+        theta, model, calibSet, ...
+        'objectiveType', args.objectiveType, ...
+        'volTypeForDiagnostics', args.volTypeForDiagnostics);
+
+    if args.useLsqnonlin
+
+        opts = optimoptions('lsqnonlin', ...
+            'Display', args.display, ...
+            'MaxIterations', args.maxIterations, ...
+            'StepTolerance', 1e-8, ...
+            'FunctionTolerance', 1e-8);
+
+        [thetaStar, resnorm, residuals, exitflag, output] = ...
+            lsqnonlin(residualFun, theta0Raw, [], [], opts);
+
+    else
+
+        objFun = @(theta) sum(residualFun(theta).^2);
+
+        opts = optimset( ...
+            'Display', args.display, ...
+            'MaxIter', args.maxIterations);
+
+        [thetaStar, resnorm, exitflag, output] = ...
+            fminsearch(objFun, theta0Raw, opts);
+
+        residuals = residualFun(thetaStar);
+    end
+
+    params = g2ppApplyTransformBrigo5(model, thetaStar);
+
+    [finalResiduals, diagnostics] = g2ppCalibrationResiduals( ...
+        thetaStar, model, calibSet, ...
+        'objectiveType', args.objectiveType, ...
+        'volTypeForDiagnostics', args.volTypeForDiagnostics);
+
+    result.thetaRaw = thetaStar;
+    result.params = params;
+    result.resnorm = resnorm;
+    result.residuals = residuals;
+    result.finalResiduals = finalResiduals;
+    result.exitflag = exitflag;
+    result.output = output;
+    result.diagnostics = diagnostics;
+
+    result.rmse = sqrt(mean(finalResiduals.^2));
+    result.maxAbsError = max(abs(finalResiduals));
+end
+```
+
+---
+
+This is now copy-paste oriented: **Annex A goes into the class**, **Annex B goes into individual `.m` files**.
+
+
+------------
+
+%% ========================================================
+%  G2++ Swaption Pricing Test: Yearfrac first, then dates
+%  Object under test:
+%
+%       G2PP.priceSwaptionG2PP(...)
+%
+%  Assumption:
+%       OIS curve is already loaded in the workspace as either:
+%
+%           oisCurve
+%
+%       or:
+%
+%           discountCurve and forecastCurve
+%
+%  Single-curve test convention:
+%       discountCurve = OIS
+%       forecastCurve = OIS
+%
+%  This is a pricing validation script, not a calibration script.
+% =========================================================
+
+clc;
+
+%% ========================================================
+%  0. Resolve OIS curves from workspace
+% =========================================================
+
+if exist("discountCurve", "var") ~= 1 || exist("forecastCurve", "var") ~= 1
+
+    if exist("oisCurve", "var") == 1
+        discountCurve = oisCurve;
+        forecastCurve = oisCurve;
+    else
+        error("Define either oisCurve or both discountCurve and forecastCurve in the workspace.");
+    end
+end
+
+assert(isa(discountCurve, "ZCCurve"), "discountCurve must be a ZCCurve.");
+assert(isa(forecastCurve, "ZCCurve"), "forecastCurve must be a ZCCurve.");
+
+%% ========================================================
+%  1. Resolve pricing date
+% =========================================================
+
+if exist("pricingDate", "var") ~= 1
+
+    if isprop(discountCurve, "pricingDate")
+        pricingDate = discountCurve.pricingDate;
+    elseif isprop(discountCurve, "date")
+        pricingDate = discountCurve.date;
+    else
+        error("Define pricingDate manually, for example pricingDate = '31/12/2015';");
+    end
+end
+
+% The current class often expects char/string dates in format dd/mm/yyyy.
+if isnumeric(pricingDate)
+    pricingDateChar = datestr(pricingDate, "dd/mm/yyyy");
+elseif isstring(pricingDate)
+    pricingDateChar = char(pricingDate);
+elseif ischar(pricingDate)
+    pricingDateChar = pricingDate;
+else
+    error("Unsupported pricingDate format.");
+end
+
+pricingDateDnum = datenum(pricingDateChar, "dd/mm/yyyy");
+
+fprintf("Pricing date used: %s\n", pricingDateChar);
+
+%% ========================================================
+%  2. Build G2++ model object
+% =========================================================
+
+basis = 3;  % ACT/365, aligned with your current class convention
+
+% Initial parameters for testing only.
+% They do not need to be calibrated yet.
+a0 = 0.10;
+b0 = 0.30;
+rho0 = -0.70;
+sigma0 = 0.010;
+eta0 = 0.010;
+
+G2PP = GaussianTwoFactors( ...
+    pricingDateChar, ...
+    a0, ...
+    b0, ...
+    discountCurve, ...
+    forecastCurve, ...
+    "basis", basis, ...
+    "displayLog", false);
+
+% The current constructor does not necessarily initialize these.
+G2PP.correlation = rho0;
+
+% Volatility bucket structure.
+% If timeSteps = [1 2 3 ...], buckets are:
+% [0,1], [1,2], ..., [last, Inf].
+G2PP.volatilityTimeStructure = [1 2 3 4 5 7 10 15 20 30];
+
+nBuckets = numel(G2PP.volatilityTimeStructure) + 1;
+
+G2PP.volatility_sigma = sigma0 .* ones(1, nBuckets);
+G2PP.volatility_eta   = eta0   .* ones(1, nBuckets);
+
+fprintf("G2PP model created.\n");
+fprintf("a = %.6f, b = %.6f, sigma = %.6f, eta = %.6f, rho = %.6f\n", ...
+    G2PP.meanReversion_x, ...
+    G2PP.meanReversion_y, ...
+    G2PP.volatility_sigma(1), ...
+    G2PP.volatility_eta(1), ...
+    G2PP.correlation);
+
+%% ========================================================
+%  3. Check required method availability
+% =========================================================
+
+availableMethods = string(methods(G2PP));
+
+requiredMethods = [
+    "getSwaptionInstrument"
+    "getSwaptionBondBasket"
+    "getLambda"
+    "getYBarFunc"
+    "yBarSolver"
+    "h1Function"
+    "h2Function"
+    "kappaFunction"
+    "getStateGaussianAtExpiry"
+    "getConditionalYMoments"
+    "brigoSwaptionIntegrand"
+];
+
+missingMethods = setdiff(requiredMethods, availableMethods);
+
+assert(isempty(missingMethods), ...
+    "Missing required G2++ methods: " + strjoin(missingMethods, ", "));
+
+hasPriceMethod = any(availableMethods == "priceSwaptionG2PP") ...
+              || any(availableMethods == "getSwaptionPriceG2PP");
+
+assert(hasPriceMethod, ...
+    "Missing pricing method: expected priceSwaptionG2PP or getSwaptionPriceG2PP.");
+
+disp("Test 1 passed: required methods are available.");
+
+%% ========================================================
+%  4. Build test swaption dates and equivalent year fractions
+% =========================================================
+
+% We build dates first, then convert to yearfrac.
+% This makes the later date-vs-yearfrac comparison meaningful.
+
+expiryDate = addDay(pricingDateChar, {"5Y"});
+
+payTenors = arrayfun(@(k) sprintf("%dY", k), 6:15, "UniformOutput", false);
+paymentDatesDate = addDay(pricingDateChar, payTenors);
+
+expiryY = yearfracExtend(pricingDateDnum, expiryDate, G2PP.basis);
+paymentDatesY = yearfracExtend(pricingDateDnum, paymentDatesDate, G2PP.basis);
+
+paymentDatesY = paymentDatesY(:).';
+
+assert(expiryY > 0, "expiryY must be positive.");
+assert(all(paymentDatesY > expiryY), "All payment dates must be after expiry.");
+
+fprintf("Expiry yearfrac: %.8f\n", expiryY);
+fprintf("First payment yearfrac: %.8f\n", paymentDatesY(1));
+fprintf("Last payment yearfrac: %.8f\n", paymentDatesY(end));
+
+%% ========================================================
+%  5. Compute ATM strike from OIS curve
+% =========================================================
+
+zc = G2PP.getInitialMarketZC([expiryY, paymentDatesY]);
+zc = zc(:);
+
+P0T0 = zc(1);
+P0Ti = zc(2:end);
+
+delta = diff([expiryY; paymentDatesY(:)]);
+annuity = sum(delta .* P0Ti);
+
+atmStrike = (P0T0 - P0Ti(end)) / annuity;
+strike = max(atmStrike, 1e-8);
+
+notional = 1e6;
+
+fprintf("P0T0     = %.10f\n", P0T0);
+fprintf("Annuity  = %.10f\n", annuity);
+fprintf("ATM K    = %.10f\n", strike);
+
+assert(isfinite(strike) && strike > 0, "ATM strike must be finite and positive.");
+assert(isfinite(annuity) && annuity > 0, "Annuity must be finite and positive.");
+
+disp("Test 2 passed: ATM strike and annuity are valid.");
+
+%% ========================================================
+%  6. Yearfrac test: instrument and bond basket
+% =========================================================
+
+instrY = G2PP.getSwaptionInstrument( ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "direction", "PAY", ...
+    "notional", notional);
+
+basketY = G2PP.getSwaptionBondBasket(instrY.expiry, instrY.paymentDates);
+
+coeffs = instrY.coeffs(:);
+A0Ti = basketY.A0Ti(:);
+Bx = basketY.Bx0Ti(:);
+By = basketY.By0Ti(:);
+
+assert(numel(coeffs) == numel(paymentDatesY), "Wrong number of basket coefficients.");
+assert(numel(A0Ti) == numel(paymentDatesY), "Wrong number of A coefficients.");
+assert(numel(Bx) == numel(paymentDatesY), "Wrong number of Bx coefficients.");
+assert(numel(By) == numel(paymentDatesY), "Wrong number of By coefficients.");
+
+assert(all(coeffs > 0), "All c_i must be positive.");
+assert(all(A0Ti > 0), "All A(T,Ti) must be positive.");
+assert(all(Bx > 0), "All Bx(T,Ti) must be positive.");
+assert(all(By > 0), "All By(T,Ti) must be positive.");
+
+disp("Test 3 passed: yearfrac instrument and bond basket are valid.");
+
+%% ========================================================
+%  7. Yearfrac test: Gaussian state at expiry
+% =========================================================
+
+G = G2PP.getStateGaussianAtExpiry(expiryY);
+
+Sigma = G.covMatrix;
+eigVals = eig(Sigma);
+
+assert(all(isfinite(eigVals)), "Covariance eigenvalues must be finite.");
+assert(all(eigVals > -1e-12), "State covariance matrix is not positive semidefinite.");
+
+sigmaX = sqrt(G.varX);
+sigmaY = sqrt(G.varY);
+rhoXY = G.covXY / (sigmaX * sigmaY);
+
+assert(isfinite(rhoXY), "State correlation must be finite.");
+assert(abs(rhoXY) <= 1 + 1e-10, "State correlation must be inside [-1,1].");
+
+fprintf("muX    = %.10e\n", G.muX);
+fprintf("muY    = %.10e\n", G.muY);
+fprintf("sigmaX = %.10e\n", sigmaX);
+fprintf("sigmaY = %.10e\n", sigmaY);
+fprintf("rhoXY  = %.10f\n", rhoXY);
+
+disp("Test 4 passed: Gaussian state is valid.");
+
+%% ========================================================
+%  8. Yearfrac test: lambda and yBar
+% =========================================================
+
+xVal = G.muX;
+
+lambda = G2PP.getLambda(coeffs, A0Ti, Bx, xVal);
+
+assert(numel(lambda) == numel(By), "lambda and By must have the same length.");
+assert(all(lambda > 0), "All lambda_i must be positive.");
+
+yBar = G2PP.yBarSolver(coeffs, A0Ti, Bx, By, xVal);
+
+[resY, derivY] = G2PP.getYBarFunc(yBar, lambda, By);
+
+fprintf("yBar       = %.10e\n", yBar);
+fprintf("residual   = %.10e\n", resY);
+fprintf("derivative = %.10e\n", derivY);
+
+assert(isfinite(yBar), "yBar must be finite.");
+assert(abs(resY) < 1e-8, "yBar residual is too large.");
+assert(derivY > 0, "yBar equation derivative should be positive.");
+
+disp("Test 5 passed: lambda and yBar are valid.");
+
+%% ========================================================
+%  9. Yearfrac test: h1, h2, kappa consistency
+% =========================================================
+
+cond = G2PP.getConditionalYMoments(xVal, G);
+
+muYCond = cond.meanY;
+varYCond = cond.varY;
+sigmaYCond = cond.stdY;
+
+h1 = G2PP.h1Function(yBar, muYCond, sigmaYCond);
+h2 = G2PP.h2Function(h1, By, sigmaYCond);
+kappa = G2PP.kappaFunction(By, muYCond, varYCond);
+
+assert(isscalar(h1), "h1 must be scalar.");
+assert(numel(h2) == numel(By), "h2 must have one value per payment date.");
+assert(numel(kappa) == numel(By), "kappa must have one value per payment date.");
+assert(all(isfinite(h2)), "h2 must be finite.");
+assert(all(isfinite(kappa)), "kappa must be finite.");
+
+% Direct theorem check:
+% h1 = (yBar - muYCond) / sigmaYCond
+h1Direct = (yBar - muYCond) / sigmaYCond;
+
+assert(abs(h1 - h1Direct) < 1e-12, "h1 does not match conditional moment formula.");
+
+disp("Test 6 passed: h1, h2, and kappa are valid.");
+
+%% ========================================================
+%  10. Yearfrac test: Brigo integrand over z-grid
+% =========================================================
+
+omegaPAY = 1;
+
+zGrid = linspace(-6, 6, 41);
+
+integrandVals = G2PP.brigoSwaptionIntegrand( ...
+    zGrid, ...
+    omegaPAY, ...
+    coeffs, ...
+    A0Ti, ...
+    Bx, ...
+    By, ...
+    G);
+
+assert(all(isfinite(integrandVals)), "Integrand has non-finite values.");
+assert(all(integrandVals > -1e-12), "Payer integrand should be nonnegative up to tolerance.");
+
+fprintf("Integrand min = %.10e\n", min(integrandVals));
+fprintf("Integrand max = %.10e\n", max(integrandVals));
+
+disp("Test 7 passed: Brigo integrand is finite.");
+
+%% ========================================================
+%  11. Yearfrac test: price payer and receiver
+% =========================================================
+
+pricePAY_Y = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "PAY", ...
+    notional);
+
+priceREC_Y = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryY, ...
+    paymentDatesY, ...
+    "REC", ...
+    notional);
+
+fprintf("Yearfrac payer price    = %.10f\n", pricePAY_Y);
+fprintf("Yearfrac receiver price = %.10f\n", priceREC_Y);
+
+assert(isfinite(pricePAY_Y), "Yearfrac payer price must be finite.");
+assert(isfinite(priceREC_Y), "Yearfrac receiver price must be finite.");
+assert(pricePAY_Y >= -1e-8, "Yearfrac payer price must be nonnegative.");
+assert(priceREC_Y >= -1e-8, "Yearfrac receiver price must be nonnegative.");
+
+disp("Test 8 passed: yearfrac prices are finite and nonnegative.");
+
+%% ========================================================
+%  12. Yearfrac test: payer-receiver parity
+% =========================================================
+
+parityLHS = pricePAY_Y - priceREC_Y;
+parityRHS = notional * (basketY.P0T0 - sum(coeffs .* basketY.P0Ti(:)));
+
+parityError = parityLHS - parityRHS;
+parityScale = max(1, abs(pricePAY_Y) + abs(priceREC_Y) + abs(parityRHS));
+
+fprintf("Parity LHS   = %.10f\n", parityLHS);
+fprintf("Parity RHS   = %.10f\n", parityRHS);
+fprintf("Parity error = %.10e\n", parityError);
+
+assert(abs(parityError) / parityScale < 1e-5, "Payer-receiver parity failed.");
+
+disp("Test 9 passed: payer-receiver parity holds.");
+
+%% ========================================================
+%  13. Date-input test: same swaption, date arguments
+% =========================================================
+
+pricePAY_Date = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryDate, ...
+    paymentDatesDate, ...
+    "PAY", ...
+    notional);
+
+priceREC_Date = localPriceSwaptionG2PP( ...
+    G2PP, ...
+    strike, ...
+    expiryDate, ...
+    paymentDatesDate, ...
+    "REC", ...
+    notional);
+
+fprintf("Date payer price    = %.10f\n", pricePAY_Date);
+fprintf("Date receiver price = %.10f\n", priceREC_Date);
+
+assert(isfinite(pricePAY_Date), "Date payer price must be finite.");
+assert(isfinite(priceREC_Date), "Date receiver price must be finite.");
+
+priceScalePAY = max(1, abs(pricePAY_Y));
+priceScaleREC = max(1, abs(priceREC_Y));
+
+relDiffPAY = abs(pricePAY_Date - pricePAY_Y) / priceScalePAY;
+relDiffREC = abs(priceREC_Date - priceREC_Y) / priceScaleREC;
+
+fprintf("Relative diff payer    = %.10e\n", relDiffPAY);
+fprintf("Relative diff receiver = %.10e\n", relDiffREC);
+
+assert(relDiffPAY < 1e-6, "Date and yearfrac payer prices are inconsistent.");
+assert(relDiffREC < 1e-6, "Date and yearfrac receiver prices are inconsistent.");
+
+disp("Test 10 passed: date and yearfrac pricing are consistent.");
+
+%% ========================================================
+%  14. Strike monotonicity sanity check
+% =========================================================
+
+KLow = max(strike - 0.0025, 1e-8);
+KHigh = strike + 0.0025;
+
+pricePAY_LowK = localPriceSwaptionG2PP( ...
+    G2PP, KLow, expiryY, paymentDatesY, "PAY", notional);
+
+pricePAY_HighK = localPriceSwaptionG2PP( ...
+    G2PP, KHigh, expiryY, paymentDatesY, "PAY", notional);
+
+priceREC_LowK = localPriceSwaptionG2PP( ...
+    G2PP, KLow, expiryY, paymentDatesY, "REC", notional);
+
+priceREC_HighK = localPriceSwaptionG2PP( ...
+    G2PP, KHigh, expiryY, paymentDatesY, "REC", notional);
+
+fprintf("Payer low K     = %.10f\n", pricePAY_LowK);
+fprintf("Payer high K    = %.10f\n", pricePAY_HighK);
+fprintf("Receiver low K  = %.10f\n", priceREC_LowK);
+fprintf("Receiver high K = %.10f\n", priceREC_HighK);
+
+assert(pricePAY_LowK >= pricePAY_HighK - 1e-8, ...
+    "Payer price should decrease with strike.");
+
+assert(priceREC_LowK <= priceREC_HighK + 1e-8, ...
+    "Receiver price should increase with strike.");
+
+disp("Test 11 passed: strike monotonicity holds.");
+
+%% ========================================================
+%  15. Final status
+% =========================================================
+
+disp("========================================================");
+disp("All G2++ swaption pricing tests passed.");
+disp("The next step is calibration on a small swaption matrix.");
+disp("========================================================");
+
+%% ========================================================
+%  Local helper: supports both possible method names
+% =========================================================
+
+function price = localPriceSwaptionG2PP(G2PP, strike, expiry, paymentDates, direction, notional)
+
+    availableMethods = string(methods(G2PP));
+
+    if any(availableMethods == "priceSwaptionG2PP")
+
+        price = G2PP.priceSwaptionG2PP( ...
+            strike, ...
+            expiry, ...
+            paymentDates, ...
+            "direction", char(direction), ...
+            "notional", notional);
+
+    elseif any(availableMethods == "getSwaptionPriceG2PP")
+
+        price = G2PP.getSwaptionPriceG2PP( ...
+            strike, ...
+            expiry, ...
+            paymentDates, ...
+            "direction", char(direction), ...
+            "notional", notional);
+
+    else
+        error("No G2++ swaption pricing method found.");
+    end
+end
+
+
+---

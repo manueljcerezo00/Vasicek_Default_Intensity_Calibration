@@ -1,0 +1,1047 @@
+Good. Immediate objective:
+
+[
+\boxed{
+\text{make one reliable } \texttt{priceSwaptionG2PP} \text{ method before calibration.}
+}
+]
+
+The uploaded class already contains bond reconstruction, bucketed variance, forward-state moments, and partial swaption machinery, but several current functions are fatal or semi-fatal for swaption pricing. 
+
+---
+
+# 1. Fatal bugs / blockers in the current file
+
+## A. Class boundary is broken
+
+You currently have:
+
+```matlab
+end
+end
+
+function output = muTForward(...)
+```
+
+This means several functions after the class ending are **local file functions**, not class methods.
+
+Fatal consequence:
+
+```matlab
+obj.varTForward(...)
+obj.covTForward(...)
+obj.getSwaptionInstrument(...)
+```
+
+will not work if those functions are outside the `methods ... end` block.
+
+**Fix:** move every intended method inside:
+
+```matlab
+methods
+    ...
+end
+```
+
+before the final `end` of the class.
+
+---
+
+## B. `muTForward` appears twice
+
+There is one version inside the class and another outside. This is dangerous.
+
+**Fix:** keep one version only.
+
+Also, the formula currently returns:
+
+```matlab
+output = sum(muComp1 + muComp2 + muComp3);
+```
+
+but the comment says:
+
+[
+\mu^T_x(s,t)=-M_x^T(s,t).
+]
+
+For the actual mean under the (T)-forward measure, use:
+
+```matlab
+output = sum(-muComp1 + muComp2 + muComp3);
+```
+
+Same logic for the (y)-process by symmetry.
+
+---
+
+## C. `args.tMaturity` is required, not optional
+
+Current:
+
+```matlab
+args.tMaturity (1,1) double;
+```
+
+Then:
+
+```matlab
+if ~isempty(args.tMaturity)
+```
+
+This is inconsistent. MATLAB will require `tMaturity`.
+
+**Fix:**
+
+```matlab
+args.tMaturity (1,1) double = NaN;
+```
+
+Then:
+
+```matlab
+if isnan(args.tMaturity)
+    tMaturity = endDate;
+else
+    tMaturity = args.tMaturity;
+end
+```
+
+---
+
+## D. `varI` is called but not defined
+
+Current method name:
+
+```matlab
+vari(obj, startDate, endDate)
+```
+
+But later:
+
+```matlab
+obj.varI(0, currMaturity)
+```
+
+Fatal.
+
+**Fix:** add alias:
+
+```matlab
+function output = varI(obj, startDate, endDate)
+    output = obj.vari(startDate, endDate);
+end
+```
+
+Keep this now. Rename later.
+
+---
+
+## E. `getSwaptionBondBasket` rejects yearfrac inputs
+
+Current logic errors unless both inputs are datenums:
+
+```matlab
+if (currMaturity > 1000) && (ulSwapSteps(1) > 1000)
+    ...
+else
+    error("currMaturity and ulSwapSteps in different format")
+end
+```
+
+Fatal for calibration, because you will usually pass yearfracs.
+
+**Fix:** allow both datenums and yearfracs.
+
+---
+
+## F. `getSwaptionInstrument` is incomplete
+
+It does not return:
+
+```matlab
+output.coeffs
+output.delta
+output.expiry
+output.paymentDates
+output.direction
+output.notional
+```
+
+But `getLambdaAndBy` expects:
+
+```matlab
+instr.coeffs
+```
+
+Fatal.
+
+---
+
+## G. `getLambdaAndBy` computes `x` but ignores it
+
+Current:
+
+```matlab
+x = x_state(:);
+...
+lambda = coeffs .* A0Ti .* exp(-Bx0Ti .* x_state);
+```
+
+Should be:
+
+```matlab
+lambda = coeffs .* A0Ti .* exp(-Bx0Ti .* x);
+```
+
+---
+
+## H. `yBarSolver` uses undefined `scalarF`
+
+Current:
+
+```matlab
+yfs = fzero(scalarF, y0, args.option);
+```
+
+Fatal.
+
+Also `args.option = optimoptions('fsolve',...)` is not correct for `fzero`.
+
+Use a scalar helper and bracketed `fzero`.
+
+---
+
+## I. `getInitialMarketZC` uses forecast curve
+
+Current:
+
+```matlab
+mktZC = obj.DCF.forecast.getDf(t, 'basisTenor', obj.basis);
+```
+
+For a first G2++ short-rate discounting model, the safer convention is:
+
+```matlab
+obj.DCF.discount.getDf(...)
+```
+
+But do not change this blindly if the current library intentionally uses forecast curve in HW1F. For now flag as **model convention risk**, not fatal.
+
+---
+
+# 2. Minimal methods needed before `priceSwaptionG2PP`
+
+You need these methods, in this order:
+
+```matlab
+varI
+getSwaptionInstrument
+getSwaptionBondBasket
+getLambdaAndBy
+getYBarValue
+yBarSolver
+getStateGaussianAtExpiry
+getConditionalYMoments
+priceSwaptionG2PP
+```
+
+The final swaption formula will use:
+
+[
+P(0,T_0)
+\mathbb E^{T_0}
+\left[
+\left(
+1-\sum_i c_iP(T_0,T_i)
+\right)^+
+\right]
+]
+
+for payer, with:
+
+[
+P(T_0,T_i)
+==========
+
+A_i
+\exp(-B^x_i x-B^y_i y).
+]
+
+---
+
+# 3. Drop-in method 1 — `varI`
+
+Put this inside the class `methods` block.
+
+```matlab
+function output = varI(obj, startDate, endDate)
+    % Alias for the integrated variance of the short-rate stochastic part:
+    %
+    %     Var( integral_startDate^endDate [x(u)+y(u)] du )
+    %
+    % Kept for compatibility with swaption-related formulas.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate   (1,1) double;
+    end
+
+    output = obj.vari(startDate, endDate);
+end
+```
+
+---
+
+# 4. Drop-in method 2 — fixed `getSwaptionInstrument`
+
+This gives the bond-basket coefficients.
+
+For a payer swaption:
+
+[
+\left[
+1-\sum_i c_iP(T_0,T_i)
+\right]^+,
+]
+
+with:
+
+[
+c_i = K\delta_i,\quad i<n,
+]
+
+[
+c_n = 1+K\delta_n.
+]
+
+```matlab
+function output = getSwaptionInstrument(obj, strike, currMaturity, ulSwapSteps, args)
+    % Builder of the Swaption Contract Specifications.
+    %
+    % INPUTS:
+    % strike       | double | scalar : swaption strike
+    % currMaturity | double | scalar : swaption expiry T0, datenum or yearfrac
+    % ulSwapSteps  | double | vector : payment dates [T1,...,Tn], datenum or yearfrac
+    %
+    % OPTIONAL INPUTS:
+    % direction | char   | scalar : 'PAY' or 'REC'
+    % notional  | double | scalar : default 1e6
+    %
+    % OUTPUT:
+    % output.expiry       | double | scalar
+    % output.paymentDates | double | column vector
+    % output.delta        | double | column vector
+    % output.coeffs       | double | column vector
+    % output.strike       | double | scalar
+    % output.direction    | char
+    % output.notional     | double
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    pricingDate_temp = datenum(obj.pricingDate, 'dd/mm/yyyy');
+
+    % Date formatting
+    if (currMaturity > 1000) && (ulSwapSteps(1) > 1000)
+        currMaturity = yearfracExtend(pricingDate_temp, currMaturity, obj.basis);
+        ulSwapSteps = yearfracExtend(pricingDate_temp, ulSwapSteps, obj.basis);
+    elseif (currMaturity <= 1000) && (ulSwapSteps(1) <= 1000)
+        % already year fractions
+    else
+        error("currMaturity and ulSwapSteps must use the same date format");
+    end
+
+    ulSwapSteps = ulSwapSteps(:);
+
+    if any(ulSwapSteps <= currMaturity)
+        error("All underlying swap payment dates must be after currMaturity.");
+    end
+
+    delta = diff([currMaturity; ulSwapSteps]);
+
+    coeffs = strike .* delta;
+    coeffs(end) = coeffs(end) + 1.0;
+
+    output.expiry = currMaturity;
+    output.paymentDates = ulSwapSteps;
+    output.delta = delta;
+    output.coeffs = coeffs;
+    output.strike = strike;
+    output.direction = upper(args.direction);
+    output.notional = args.notional;
+end
+```
+
+---
+
+# 5. Drop-in method 3 — fixed `getSwaptionBondBasket`
+
+```matlab
+function output = getSwaptionBondBasket(obj, currMaturity, ulSwapSteps)
+    % Builds the affine G2++ bond basket:
+    %
+    %     P(T0,Ti) = A(T0,Ti) * exp(-Bx(T0,Ti)*x - By(T0,Ti)*y)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+    end
+
+    if isnumeric(obj.pricingDate)
+        pricingDate_temp = obj.pricingDate;
+    elseif isstring(obj.pricingDate) || ischar(obj.pricingDate)
+        pricingDate_temp = datenum(char(obj.pricingDate), 'dd/mm/yyyy');
+    else
+        error("pricingDate must be numeric datenum, datetime, char, or string");
+    end
+
+    if (currMaturity > 1000) && (ulSwapSteps(1) > 1000)
+        currMaturity = yearfracExtend(pricingDate_temp, currMaturity, obj.basis);
+        ulSwapSteps = yearfracExtend(pricingDate_temp, ulSwapSteps, obj.basis);
+    elseif (currMaturity <= 1000) && (ulSwapSteps(1) <= 1000)
+        % already year fractions
+    else
+        error("currMaturity and ulSwapSteps must use the same date format");
+    end
+
+    ulSwapSteps = ulSwapSteps(:);
+    nPayDates = numel(ulSwapSteps);
+
+    zc = obj.getInitialMarketZC([currMaturity, ulSwapSteps.']);
+    zc = zc(:);
+
+    P0T0 = zc(1);
+    P0Ti = zc(2:end);
+
+    dt = ulSwapSteps - currMaturity;
+
+    Bx0Ti = obj.getH(obj.meanReversion_x, dt);
+    By0Ti = obj.getH(obj.meanReversion_y, dt);
+
+    var0T0 = obj.varI(0, currMaturity);
+
+    varT0Ti = zeros(nPayDates, 1);
+    var0Ti = zeros(nPayDates, 1);
+
+    for i = 1:nPayDates
+        Ti = ulSwapSteps(i);
+        varT0Ti(i) = obj.varI(currMaturity, Ti);
+        var0Ti(i) = obj.varI(0, Ti);
+    end
+
+    A0Ti = (P0Ti ./ P0T0) .* exp(0.5 .* (varT0Ti - var0Ti + var0T0));
+
+    output.P0T0 = P0T0;
+    output.P0Ti = P0Ti;
+    output.A0Ti = A0Ti(:);
+    output.Bx0Ti = Bx0Ti(:);
+    output.By0Ti = By0Ti(:);
+    output.expiry = currMaturity;
+    output.paymentDates = ulSwapSteps;
+end
+```
+
+---
+
+# 6. Drop-in method 4 — fixed `getLambdaAndBy`
+
+```matlab
+function [lambda, By] = getLambdaAndBy(obj, strike, currMaturity, ulSwapSteps, x_state, args)
+    % Returns:
+    %
+    %     lambda_i(x) = c_i * A(T0,Ti) * exp(-Bx(T0,Ti)*x)
+    %
+    % and By(T0,Ti).
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        x_state (1,1) double = 0;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    instr = obj.getSwaptionInstrument( ...
+        strike, currMaturity, ulSwapSteps, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    basket = obj.getSwaptionBondBasket(currMaturity, ulSwapSteps);
+
+    coeffs = instr.coeffs(:);
+    A0Ti = basket.A0Ti(:);
+    Bx0Ti = basket.Bx0Ti(:);
+    By0Ti = basket.By0Ti(:);
+
+    x = x_state;
+
+    lambda = coeffs .* A0Ti .* exp(-Bx0Ti .* x);
+    By = By0Ti;
+end
+```
+
+---
+
+# 7. Drop-in method 5 — scalar Y-bar value
+
+Needed because `fzero` needs a scalar-valued function.
+
+```matlab
+function value = getYBarValue(obj, y, lambda, By)
+    % Scalar value of:
+    %
+    %     f(y) = 1 - sum_i lambda_i exp(-By_i y)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        y (1,1) double;
+        lambda (:,1) double;
+        By (:,1) double;
+    end
+
+    value = 1 - sum(lambda .* exp(-By .* y));
+end
+```
+
+Keep your existing derivative function if `newtonVector` works.
+
+---
+
+# 8. Drop-in method 6 — robust `yBarSolver`
+
+This version uses bracketed `fzero`. Since (f(y)) is monotone increasing, bracketing is robust.
+
+```matlab
+function yBar = yBarSolver(obj, strike, currMaturity, ulSwapSteps, x_state, args)
+    % Solves for yBar(x):
+    %
+    %     1 = sum_i c_i A(T0,Ti) exp(-Bx_i*x - By_i*yBar)
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        x_state (1,1) double = 0;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+        args.ySeed (1,1) double = 0;
+        args.maxExpansion (1,1) double = 25;
+        args.tolerance (1,1) double = 1e-10;
+    end
+
+    [lambda, By] = obj.getLambdaAndBy( ...
+        strike, currMaturity, ulSwapSteps, x_state, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    lambda = lambda(:);
+    By = By(:);
+
+    scalarF = @(y) obj.getYBarValue(y, lambda, By);
+
+    yLow = args.ySeed - 0.01;
+    yHigh = args.ySeed + 0.01;
+
+    fLow = scalarF(yLow);
+    fHigh = scalarF(yHigh);
+
+    expansion = 0;
+
+    while fLow * fHigh > 0 && expansion < args.maxExpansion
+        width = yHigh - yLow;
+        yLow = yLow - 2 * width;
+        yHigh = yHigh + 2 * width;
+
+        fLow = scalarF(yLow);
+        fHigh = scalarF(yHigh);
+
+        expansion = expansion + 1;
+    end
+
+    if fLow * fHigh > 0
+        yBar = NaN;
+        return;
+    end
+
+    yBar = fzero(scalarF, [yLow, yHigh]);
+
+    res = scalarF(yBar);
+
+    if ~isfinite(yBar) || abs(res) > args.tolerance
+        yBar = NaN;
+    end
+end
+```
+
+---
+
+# 9. Drop-in method 7 — state Gaussian at expiry
+
+Under (T_0)-forward measure, at expiry (T_0):
+
+[
+(X_{T_0},Y_{T_0})
+\sim
+\mathcal N
+\left(
+\mu^{T_0},
+\Sigma
+\right).
+]
+
+```matlab
+function output = getStateGaussianAtExpiry(obj, currMaturity)
+    % Computes the Gaussian law of (x(T0), y(T0)) under the T0-forward measure.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        currMaturity (1,1) double;
+    end
+
+    T0 = currMaturity;
+
+    muX = obj.muTForward(0, T0, ...
+        'process', 'x_process', ...
+        'tMaturity', T0);
+
+    muY = obj.muTForward(0, T0, ...
+        'process', 'y_process', ...
+        'tMaturity', T0);
+
+    varX = obj.varTForward(0, T0, 'process', 'x_process');
+    varY = obj.varTForward(0, T0, 'process', 'y_process');
+    covXY = obj.covTForward(0, T0);
+
+    covMatrix = [varX, covXY; covXY, varY];
+
+    output.muX = muX;
+    output.muY = muY;
+    output.varX = varX;
+    output.varY = varY;
+    output.covXY = covXY;
+    output.covMatrix = covMatrix;
+end
+```
+
+This requires `varTForward` and `covTForward` to be inside the class methods block.
+
+---
+
+# 10. Drop-in method 8 — conditional (Y|X=x)
+
+For bivariate normal:
+
+[
+Y|X=x
+\sim
+\mathcal N(m_{Y|x},s^2_{Y|x}),
+]
+
+with:
+
+[
+m_{Y|x}
+=======
+
+\mu_Y
++
+\frac{\operatorname{Cov}(X,Y)}{\operatorname{Var}(X)}
+(x-\mu_X),
+]
+
+[
+s^2_{Y|x}
+=========
+
+## \operatorname{Var}(Y)
+
+\frac{\operatorname{Cov}(X,Y)^2}{\operatorname{Var}(X)}.
+]
+
+```matlab
+function output = getConditionalYMoments(obj, x, gaussianState)
+    % Computes conditional moments of Y given X = x.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        x (1,1) double;
+        gaussianState (1,1) struct;
+    end
+
+    varX = gaussianState.varX;
+    varY = gaussianState.varY;
+    covXY = gaussianState.covXY;
+
+    if varX <= 0
+        error("varX must be strictly positive for conditional Gaussian formula.");
+    end
+
+    condMeanY = gaussianState.muY + (covXY / varX) * (x - gaussianState.muX);
+    condVarY = varY - (covXY^2 / varX);
+
+    condVarY = max(condVarY, 0);
+
+    output.meanY = condMeanY;
+    output.varY = condVarY;
+    output.stdY = sqrt(condVarY);
+end
+```
+
+---
+
+# 11. Main method — `priceSwaptionG2PP`
+
+This is the immediate pricer.
+
+It uses numerical integration over the normalized (X)-factor:
+
+[
+X=\mu_X+\sigma_X z,
+\qquad
+z\sim \mathcal N(0,1).
+]
+
+For payer:
+
+[
+\mathbb E[(1-\sum_i \lambda_i e^{-B_iY})^+|X=x].
+]
+
+For receiver:
+
+[
+\mathbb E[(\sum_i \lambda_i e^{-B_iY}-1)^+|X=x].
+]
+
+```matlab
+function price = priceSwaptionG2PP(obj, strike, currMaturity, ulSwapSteps, args)
+    % Prices a European swaption under G2++ using one-dimensional integration.
+    %
+    % Payer payoff at expiry T0:
+    %
+    %     [1 - sum_i c_i P(T0,Ti)]^+
+    %
+    % Receiver payoff:
+    %
+    %     [sum_i c_i P(T0,Ti) - 1]^+
+    %
+    % Price:
+    %
+    %     P(0,T0) * E^{T0}[ payoff ]
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        currMaturity (1,1) double;
+        ulSwapSteps (1,:) double;
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+        args.integrationLower (1,1) double = -8;
+        args.integrationUpper (1,1) double = 8;
+        args.absTol (1,1) double = 1e-10;
+        args.relTol (1,1) double = 1e-8;
+    end
+
+    instr = obj.getSwaptionInstrument( ...
+        strike, currMaturity, ulSwapSteps, ...
+        'direction', args.direction, ...
+        'notional', args.notional);
+
+    basket = obj.getSwaptionBondBasket(instr.expiry, instr.paymentDates);
+
+    gaussianState = obj.getStateGaussianAtExpiry(instr.expiry);
+
+    if gaussianState.varX <= 0
+        error("X variance at expiry must be strictly positive.");
+    end
+
+    stdX = sqrt(gaussianState.varX);
+
+    coeffs = instr.coeffs(:);
+    A0Ti = basket.A0Ti(:);
+    Bx = basket.Bx0Ti(:);
+    By = basket.By0Ti(:);
+
+    integrand = @(z) localSwaptionIntegrand( ...
+        z, ...
+        gaussianState.muX, ...
+        stdX, ...
+        gaussianState, ...
+        coeffs, A0Ti, Bx, By, ...
+        instr.direction);
+
+    expectation = integral( ...
+        integrand, ...
+        args.integrationLower, ...
+        args.integrationUpper, ...
+        'ArrayValued', true, ...
+        'AbsTol', args.absTol, ...
+        'RelTol', args.relTol);
+
+    price = instr.notional * basket.P0T0 * expectation;
+end
+```
+
+This method calls a local helper. If your library dislikes local functions, make this a private method.
+
+---
+
+# 12. Helper — local integrand
+
+Place this as a local function at the bottom of the file, or convert to a private method.
+
+```matlab
+function val = localSwaptionIntegrand(z, muX, stdX, gaussianState, coeffs, A0Ti, Bx, By, direction)
+    % Integrand over z ~ N(0,1).
+
+    z = z(:).';
+    val = zeros(size(z));
+
+    for j = 1:numel(z)
+        x = muX + stdX * z(j);
+
+        lambda = coeffs .* A0Ti .* exp(-Bx .* x);
+
+        yBar = localSolveYBarFromLambda(lambda, By);
+
+        if ~isfinite(yBar)
+            val(j) = NaN;
+            continue;
+        end
+
+        varX = gaussianState.varX;
+        varY = gaussianState.varY;
+        covXY = gaussianState.covXY;
+
+        meanY = gaussianState.muY + (covXY / varX) * (x - gaussianState.muX);
+        varYCond = max(varY - covXY^2 / varX, 0);
+        stdYCond = sqrt(varYCond);
+
+        if stdYCond <= 0
+            basketValue = sum(lambda .* exp(-By .* meanY));
+
+            if strcmpi(direction, 'PAY')
+                payoff = max(1 - basketValue, 0);
+            else
+                payoff = max(basketValue - 1, 0);
+            end
+
+            val(j) = payoff * normpdf(z(j));
+            continue;
+        end
+
+        if strcmpi(direction, 'PAY')
+            % payoff positive when Y > yBar
+            probTerm = normcdf((meanY - yBar) / stdYCond);
+
+            expTerm = exp(-By .* meanY + 0.5 .* (By.^2) .* varYCond) ...
+                    .* normcdf((meanY - yBar - By .* varYCond) ./ stdYCond);
+
+            condPayoff = probTerm - sum(lambda .* expTerm);
+
+        else
+            % receiver payoff positive when Y < yBar
+            probTerm = normcdf((yBar - meanY) / stdYCond);
+
+            expTerm = exp(-By .* meanY + 0.5 .* (By.^2) .* varYCond) ...
+                    .* normcdf((yBar - meanY + By .* varYCond) ./ stdYCond);
+
+            condPayoff = sum(lambda .* expTerm) - probTerm;
+        end
+
+        val(j) = max(condPayoff, 0) * normpdf(z(j));
+    end
+end
+```
+
+---
+
+# 13. Helper — local y-bar solver from lambda
+
+```matlab
+function yBar = localSolveYBarFromLambda(lambda, By)
+    % Solves:
+    %
+    %     1 - sum_i lambda_i exp(-By_i y) = 0
+
+    lambda = lambda(:);
+    By = By(:);
+
+    f = @(y) 1 - sum(lambda .* exp(-By .* y));
+
+    yLow = -0.05;
+    yHigh = 0.05;
+
+    fLow = f(yLow);
+    fHigh = f(yHigh);
+
+    expansion = 0;
+
+    while fLow * fHigh > 0 && expansion < 30
+        width = yHigh - yLow;
+        yLow = yLow - 2 * width;
+        yHigh = yHigh + 2 * width;
+
+        fLow = f(yLow);
+        fHigh = f(yHigh);
+
+        expansion = expansion + 1;
+    end
+
+    if fLow * fHigh > 0
+        yBar = NaN;
+        return;
+    end
+
+    yBar = fzero(f, [yLow, yHigh]);
+end
+```
+
+---
+
+# 14. Minimal insertion order
+
+Do not insert `priceSwaptionG2PP` first. Insert in this order:
+
+```matlab
+varI
+```
+
+```matlab
+fixed muTForward
+```
+
+```matlab
+varTForward and covTForward inside methods block
+```
+
+```matlab
+getSwaptionInstrument
+```
+
+```matlab
+getSwaptionBondBasket
+```
+
+```matlab
+getLambdaAndBy
+```
+
+```matlab
+getYBarValue
+```
+
+```matlab
+yBarSolver
+```
+
+```matlab
+getStateGaussianAtExpiry
+```
+
+```matlab
+priceSwaptionG2PP
+```
+
+Then test one ATM payer swaption.
+
+---
+
+# 15. First robustness tests
+
+## Test 1 — class method availability
+
+```matlab
+methods(model)
+```
+
+Check that these appear:
+
+```matlab
+varTForward
+covTForward
+getSwaptionInstrument
+getSwaptionBondBasket
+priceSwaptionG2PP
+```
+
+If not, they are still outside the class.
+
+---
+
+## Test 2 — positive state covariance
+
+```matlab
+G = model.getStateGaussianAtExpiry(5.0);
+
+Sigma = G.covMatrix;
+
+eigVals = eig(Sigma);
+
+assert(all(eigVals > -1e-12));
+```
+
+This catches invalid (\rho), bad vol buckets, or formula bugs.
+
+---
+
+## Test 3 — positive finite swaption price
+
+```matlab
+strike = 0.02;
+expiry = 5.0;
+paymentDates = 6.0:1.0:15.0;
+
+price = model.priceSwaptionG2PP(strike, expiry, paymentDates, ...
+    'direction', 'PAY', ...
+    'notional', 1e6);
+
+assert(isfinite(price));
+assert(price >= 0);
+```
+
+---
+
+# 16. Bottom line
+
+Current class is close enough to attempt a first swaption price, but only after fixing the fatal plumbing:
+
+[
+\boxed{
+\text{class boundary}
+}
+]
+
+[
+\boxed{
+\texttt{varI}/\texttt{vari} mismatch}
+]
+
+[
+\boxed{
+\texttt{muTForward} optional maturity and sign}
+]
+
+[
+\boxed{
+\texttt{getSwaptionInstrument} incomplete}
+]
+
+[
+\boxed{
+\texttt{yBarSolver} undefined fallback}
+]
+
+Then `priceSwaptionG2PP` can be introduced as a **prototype pricing method**. Calibration should come only after this method returns stable finite prices over a small swaption grid.
