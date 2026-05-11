@@ -1,22 +1,5 @@
 # Calibration and Model Choices
 
-**User:** Anonymous  
-**Created:** 5/7/2026 14:01:16  
-**Updated:** 5/11/2026 10:42:02  
-**Exported:** 5/11/2026 10:44:10  
-**Link:** [https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/69fc7ef9-8f20-83eb-b82b-88c7b6b3a36e](https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/69fc7ef9-8f20-83eb-b82b-88c7b6b3a36e)  
-
-## Prompt:
-5/7/2026, 5:55:41 PM
-
-Seems to me that this is a good direction. I agree but for now let's leave out the adjust strike functionality to have a well perfoming calibrator before thtat.
-
-Let's then develop the first part of the swaptionPiecewiseCalibrationG2PP.m file
-
-let's focus on a first signficant testable section, before the entire pipeline.
-
-## Response:
-5/7/2026, 5:55:42 PM
 
 > **Providing MATLAB skeleton code**
 >
