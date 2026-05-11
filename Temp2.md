@@ -1,43 +1,5 @@
 # Calibration and Model Choices
 
-**User:** Anonymous  
-**Created:** 5/7/2026 14:01:16  
-**Updated:** 5/11/2026 15:13:28  
-**Exported:** 5/11/2026 15:14:43  
-**Link:** [https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/69fc7ef9-8f20-83eb-b82b-88c7b6b3a36e](https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/69fc7ef9-8f20-83eb-b82b-88c7b6b3a36e)  
-
-## Response:
-5/11/2026, 3:07:37 PM
-
-> **Finalizing helper functions for calibration pipeline**
->
-> I need to finalize MATLAB code for a series of calibration helpers, focusing on functions like `buildCalibrationIRS`, `computeCalibrationStrike`, `inferSwaptionDirection`, and more. I'll add comments to explain each function. Also, I'll need to address concerns around missing adjustments and how to compute simple strikes when options are involved.
->
-> **Defining behavior for strike calibration and swaption option handling**
->
-> I’m working through options for strike calibration and handling swaps/option inputs. For `computeCalibrationStrike`, if `args.strike` is empty, I’ll use the FairSwapRate from `npv`. If an option strike exists, I’ll evaluate it accordingly. I’ll stick to a simple approach for now, checking whether options are scalar or not. For swaption direction, I'll determine if it's a "Pay" or "Receive" based on the fair rate comparison.
->
-> **Handling market pricing and future volatilities**
->
-> In `computeMarketPrice`, I'll check if `args.vol` is empty or just one value and call the appropriate pricer method. If needed, I’ll handle the output count for different pricers using `try-catch`. For `assembleTrialCalibrationVols`, I’ll be mindful of how future buckets might affect swaption pricing, ensuring I handle required volatility buckets beyond calibration time when they are not calibrated yet.
->
-> **Managing future volatility assumptions for calibration**
->
-> When pricing bonds at time `T`, early bucket calibration needs assumptions about future volatility. I’ll handle this by setting future buckets to initial or trial values (like flat forward). For a one-step local solve, I can avoid look-ahead by filling future buckets with the current theta. This will help stabilize the calibration process.
->
-> **Finalizing local helper functions and placeholders**
->
-> Since the user hasn't decided on the full calibration policy yet, I’ll proceed with providing the local helper functions without committing to specific policies. For now, I’ll assume `theta` has length 2 and mark it as a placeholder. I can later modify this once a more concrete policy is defined.
->
-> **Setting up functions and handling args**
->
-> To match the helpful function names like `buildCalibrationIRS` and `computeCalibrationStrike`, I’ll keep it consistent and add comments for clarity. The `args` structure from the main function seems fine for local use. However, I’ll skip the argument validation to keep it simple. I’ll also address warnings needed for some functions like `computeCalibrationStrike`.
->
-> Thought for 1m 15s
-
-Good. Since `adjustStrike` and calibration policy are intentionally excluded, the next helpers should only build the **instrument package**, **market price**, and a **solver-neutral G2++ price residual**.
-
-Paste these below your current `buildPricers` helper.
 
 ```matlab
 function [irs, npv, settleType, irsOpt] = buildCalibrationIRS(obj, args, calibGrid, step, pricers)
