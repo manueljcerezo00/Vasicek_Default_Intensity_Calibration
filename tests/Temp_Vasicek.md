@@ -3432,7 +3432,982 @@ etaShapePack = obj.bootstrapSliceG1PP( ...
     'shapeName', 'eta');
 ```
 
+## Response:
+5/15/2026, 3:33:00 PM
+
+> **Reworking architecture without citations**
+>
+> The user asked for a redo of the architecture, but it's clear they likely don’t need code or citations. The file is uploaded, but there’s really no reason to cite specific class properties unless it directly ties into the architecture. I can focus on reworking the structure without citations or exact references from the file.
+>
+> Thought for 7s
+
+Object:
+
+$$
+\boxed{
+\text{ONE-FACTOR INITIALIZATION for XG2++}
+}
+$$
+
+Mathematical responsibility:
+
+$$
+\text{produce } a_{G1},\ \bar\sigma^{short}(t),\ \bar\sigma^{long}(t)
+$$
+
+before the reduced G2++ scaling stage.
+
+Software responsibility:
+
+$$
+\boxed{
+\text{reuse G2++ bucket/variance helpers through a temporary G1++ state wrapper}
+}
+$$
+
+The wrapper lives only inside:
+
+```matlab
+priceSwaptionG1PP
+```
+
+not in the residuals, not in the bootstrap loop.
+
+---
+
+```text
+ONE-FACTOR INITIALIZATION
+│
+├─ calibrateGlobalG1PP
+│   │
+│   ├─ buildCalibrationPointFromSurface
+│   │     → loop over all finite surface quotes
+│   │     → IRS
+│   │     → strike
+│   │     → direction
+│   │     → swaptionPack / paymentDates
+│   │     → marketPrice
+│   │
+│   ├─ residualGlobalG1PP
+│   │     θ = [log(a), log(sigma)]
+│   │       ↓
+│   │     build constant G1++ vol vector
+│   │       ↓
+│   │     priceSwaptionG1PP for each calibration point
+│   │       ↓
+│   │     normalized price residual vector
+│   │
+│   └─ solve
+│         → g1Global.a
+│         → g1Global.sigma
+│         → g1Global.residuals
+│         → g1Global.diagnostics
+│
+├─ bootstrapSliceG1PP  [short tenor]
+│   │
+│   ├─ select tenor column
+│   │     → xg2ppState.shortTenorIdx
+│   │
+│   ├─ buildCalibrationPointFromSurface
+│   │     → one point per finite expiry quote
+│   │
+│   ├─ residualBucketG1PP
+│   │     σ_k
+│   │       ↓
+│   │     previous σ_1,...,σ_{k-1} frozen
+│   │       ↓
+│   │     trial piecewise G1++ vol vector
+│   │       ↓
+│   │     priceSwaptionG1PP
+│   │       ↓
+│   │     scalar price residual
+│   │
+│   ├─ solve local σ_k
+│   │
+│   └─ return sigmaShapePack
+│         → short-tenor volatility shape
+│         → prices / residuals / strikes / directions
+│
+└─ bootstrapSliceG1PP  [long tenor]
+    │
+    ├─ select tenor column
+    │     → xg2ppState.longTenorIdx
+    │
+    ├─ buildCalibrationPointFromSurface
+    │     → one point per finite expiry quote
+    │
+    ├─ residualBucketG1PP
+    │     σ_k
+    │       ↓
+    │     previous σ_1,...,σ_{k-1} frozen
+    │       ↓
+    │     trial piecewise G1++ vol vector
+    │       ↓
+    │     priceSwaptionG1PP
+    │       ↓
+    │     scalar price residual
+    │
+    ├─ solve local σ_k
+    │
+    └─ return etaShapePack
+          → long-tenor volatility shape
+          → prices / residuals / strikes / directions
+```
+
+# Internal pricing architecture
+
+```text
+priceSwaptionG1PP
+│
+├─ setTemporaryG1PPState
+│     → save current G2++ state
+│     → set meanReversion_x = a
+│     → set volatility_sigma = trial G1++ vector
+│     → set volatility_eta = zeros
+│     → set correlation = 0
+│     → set volatilityTimeStructure = trial bucket dates
+│
+├─ getBondBasketG1PP
+│     → uses existing G2++ primitives
+│     → getInitialMarketZC
+│     → getH
+│     → variXOnly
+│
+├─ getStateGaussianG1PP
+│     → uses existing G2++ primitives
+│     → varTForward('x_process')
+│     → meanForwardG1PP or reduced x-forward mean
+│
+├─ solveXBarG1PP
+│     → Jamshidian boundary
+│
+├─ priceFromG1PPBasket
+│     → closed-form one-factor Gaussian swaption price
+│
+└─ restoreG1PPState
+      → restore original G2++ parameters even if pricing fails
+```
+
+# Helper list after architectural cleanup
+
+## Calibration-level helpers
+
+```text
+calibrateGlobalG1PP
+residualGlobalG1PP
+bootstrapSliceG1PP
+residualBucketG1PP
+buildCalibrationPointFromSurface
+```
+
+## G1++ pricing helpers
+
+```text
+priceSwaptionG1PP
+setTemporaryG1PPState
+restoreG1PPState
+getBondBasketG1PP
+variXOnly
+getStateGaussianG1PP
+meanForwardG1PP
+solveXBarG1PP
+priceFromG1PPBasket
+```
+
+# What changes versus the previous version
+
+We remove these explicit duplicate numerical helpers:
+
+```text
+varianceIntegralG1PP
+varianceStateG1PP
+getBucketBoundsG1PP
+```
+
+because the existing G2++ object already owns that logic through:
+
+```text
+getBucketBounds
+getPricingIdx
+deltaTLeft
+deltaTRight
+variX
+varTForward
+getH
+getExpDiff
+```
+
+The price is that `priceSwaptionG1PP` becomes stateful internally, so it must save and restore object state.
+
+# Final design rule
+
+```text
+calibrateGlobalG1PP
+bootstrapSliceG1PP
+residualGlobalG1PP
+residualBucketG1PP
+    → do not mutate object state directly.
+
+priceSwaptionG1PP
+    → only method allowed to mutate temporary G1++ state.
+
+setTemporaryG1PPState / restoreG1PPState
+    → only methods allowed to touch temporary model-state replacement.
+```
+
+This keeps the calibration pipeline readable while reusing the already-tested G2++ bucket and variance machinery.
+
+## Response:
+5/15/2026, 3:33:43 PM
+
+> **Providing code without citations unless based on file facts**
+>
+> The user asked for code, so I should focus on providing just that, with minimal distractions. Since the request doesn't involve referencing uploaded files, no citations are needed. I'll stick to creating MATLAB methods with no nested utilities, light validation, and avoid overly lengthy code.
+>
+> Thought for 32s
+
+Use this version. It keeps the calibration-level helpers clean and puts the temporary G1++ state wrapper only inside `priceSwaptionG1PP`.
+
+Paste inside `methods` of `GaussianTwoFactors`.
+
+```matlab
+function g1Global = calibrateGlobalG1PP(obj, surfacePack, pricers, args)
+    % G2++ Calibration Helper: Calibrates a constant-volatility G1++ model
+    % to the full swaption surface.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+
+        args.initialA (1,1) double = NaN;
+        args.initialSigma (1,1) double = 0.01;
+
+        args.useLsqnonlin (1,1) logical = true;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    a0 = args.initialA;
+    if isnan(a0)
+        a0 = obj.meanReversion_x;
+    end
+    if isempty(a0) || a0 <= 0
+        a0 = 0.10;
+    end
+
+    theta0 = log([a0; args.initialSigma]);
+
+    calibSet = struct([]);
+    k = 0;
+
+    for i = 1:surfacePack.nbExpiries
+        for j = 1:surfacePack.nbTenors
+
+            if ~surfacePack.validMask(i,j)
+                continue
+            end
+
+            k = k + 1;
+
+            calibSet(k) = obj.buildCalibrationPointFromSurface( ...
+                surfacePack, pricers, i, j, ...
+                'irs', args.irs, ...
+                'notional', args.notional, ...
+                'settleType', args.settleType);
+        end
+    end
+
+    residualFun = @(theta) obj.residualGlobalG1PP( ...
+        theta, calibSet, surfacePack, ...
+        'objectiveType', args.objectiveType);
+
+    if args.useLsqnonlin && exist('lsqnonlin', 'file') == 2
+
+        options = optimoptions('lsqnonlin', ...
+            'Display', 'none', ...
+            'MaxIterations', 300, ...
+            'FunctionTolerance', 1e-8, ...
+            'StepTolerance', 1e-8);
+
+        [thetaStar, resnorm, residuals, exitflag, output] = ...
+            lsqnonlin(residualFun, theta0, [], [], options);
+
+    else
+
+        options = optimset('Display', 'off', 'MaxIter', 300);
+        objFun = @(theta) sum(residualFun(theta).^2);
+
+        [thetaStar, resnorm, exitflag, output] = ...
+            fminsearch(objFun, theta0, options);
+
+        residuals = residualFun(thetaStar);
+    end
+
+    params = exp(thetaStar);
+
+    g1Global = struct();
+    g1Global.a = params(1);
+    g1Global.sigma = params(2);
+    g1Global.thetaStar = thetaStar;
+    g1Global.calibSet = calibSet;
+    g1Global.residuals = residuals;
+    g1Global.resnorm = resnorm;
+    g1Global.exitflag = exitflag;
+    g1Global.output = output;
+    g1Global.rmse = sqrt(mean(residuals.^2));
+    g1Global.maxAbsResidual = max(abs(residuals));
+end
+```
+
+```matlab
+function residuals = residualGlobalG1PP(obj, thetaRaw, calibSet, surfacePack, args)
+    % G2++ Calibration Helper: Full-surface residual for constant G1++.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        calibSet (1,:) struct;
+        surfacePack (1,1) struct;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    params = exp(thetaRaw(:));
+    a = params(1);
+    sigma = params(2);
+
+    maxMat = max(surfacePack.matSwapDatesYr(:));
+    volTimeStructure = maxMat + 1.0;
+    volVector = sigma .* ones(2,1);
+
+    residuals = NaN(numel(calibSet), 1);
+
+    for k = 1:numel(calibSet)
+
+        point = calibSet(k);
+
+        modelPrice = obj.priceSwaptionG1PP( ...
+            point.strike, ...
+            point.expiry, ...
+            point.paymentDates, ...
+            a, ...
+            volVector, ...
+            volTimeStructure, ...
+            'direction', point.direction, ...
+            'notional', point.notional);
+
+        switch args.objectiveType
+            case 'price'
+                scale = 1.0;
+            otherwise
+                scale = max(point.notional * point.annuity, 1e-12);
+        end
+
+        residuals(k) = sqrt(point.weight) * ...
+            (modelPrice - point.marketPrice) / scale;
+
+        if ~isfinite(residuals(k))
+            residuals(k) = 1e6;
+        end
+    end
+end
+```
+
+```matlab
+function shapePack = bootstrapSliceG1PP(obj, surfacePack, pricers, g1Global, args)
+    % G2++ Calibration Helper: Bootstraps one G1++ piecewise volatility
+    % slice. Use once for the short-tenor shape and once for the long-tenor shape.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+        g1Global (1,1) struct;
+
+        args.tenorIdx (1,1) double;
+        args.shapeName (1,:) char = 'sigma';
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+
+        args.initialVol (1,1) double = NaN;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    tenorIdx = args.tenorIdx;
+    quoteRows = find(surfacePack.validMask(:, tenorIdx));
+    nbSteps = numel(quoteRows);
+
+    initialVol = args.initialVol;
+    if isnan(initialVol)
+        initialVol = g1Global.sigma;
+    end
+
+    shape = NaN(nbSteps, 1);
+    modelPrices = NaN(nbSteps, 1);
+    marketPrices = NaN(nbSteps, 1);
+    residuals = NaN(nbSteps, 1);
+    strikes = NaN(nbSteps, 1);
+    directions = strings(nbSteps, 1);
+    solverMethod = strings(nbSteps, 1);
+
+    timeStructure = surfacePack.expiryDatesYr(quoteRows);
+    timeStructure = timeStructure(:);
+
+    for k = 1:nbSteps
+
+        row = quoteRows(k);
+
+        point = obj.buildCalibrationPointFromSurface( ...
+            surfacePack, pricers, row, tenorIdx, ...
+            'irs', args.irs, ...
+            'notional', args.notional, ...
+            'settleType', args.settleType);
+
+        if k == 1
+            guess = initialVol;
+        else
+            guess = shape(k-1);
+        end
+
+        resFun = @(v) obj.residualBucketG1PP( ...
+            v, k, shape, timeStructure, point, g1Global.a, ...
+            'objectiveType', args.objectiveType);
+
+        try
+            volK = fzero(resFun, [1e-5, 1.0]);
+            solverMethod(k) = "fzero";
+        catch
+            volK = fminsearch(@(v) resFun(abs(v)).^2, guess, ...
+                optimset('Display', 'off', 'MaxIter', 100));
+            volK = abs(volK);
+            solverMethod(k) = "fminsearch";
+        end
+
+        shape(k) = max(volK, 1e-8);
+
+        volVector = [shape(1:k); shape(k)];
+        volTimeStructure = timeStructure(1:k);
+
+        modelPrice = obj.priceSwaptionG1PP( ...
+            point.strike, ...
+            point.expiry, ...
+            point.paymentDates, ...
+            g1Global.a, ...
+            volVector, ...
+            volTimeStructure, ...
+            'direction', point.direction, ...
+            'notional', point.notional);
+
+        modelPrices(k) = modelPrice;
+        marketPrices(k) = point.marketPrice;
+        residuals(k) = modelPrice - point.marketPrice;
+        strikes(k) = point.strike;
+        directions(k) = string(point.direction);
+    end
+
+    shapePack = struct();
+    shapePack.name = args.shapeName;
+    shapePack.tenorIdx = tenorIdx;
+    shapePack.tenor = surfacePack.tenorsYr(tenorIdx);
+
+    shapePack.timeStructure = timeStructure;
+    shapePack.timeStructureDt = timeStructure;
+    shapePack.shape = shape;
+
+    shapePack.modelPrices = modelPrices;
+    shapePack.marketPrices = marketPrices;
+    shapePack.residuals = residuals;
+    shapePack.strikes = strikes;
+    shapePack.directions = directions;
+    shapePack.solverMethod = solverMethod;
+
+    shapePack.g1MeanReversion = g1Global.a;
+    shapePack.quoteRows = quoteRows;
+end
+```
+
+```matlab
+function residual = residualBucketG1PP(obj, volCandidate, step, shape, timeStructure, point, a, args)
+    % G2++ Calibration Helper: Scalar residual for one G1++ bootstrap bucket.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        volCandidate (1,1) double;
+        step (1,1) double;
+        shape (:,1) double;
+        timeStructure (:,1) double;
+        point (1,1) struct;
+        a (1,1) double;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    volCandidate = abs(volCandidate);
+
+    volSlice = shape(1:step);
+    volSlice(step) = volCandidate;
+
+    volVector = [volSlice; volCandidate];
+    volTimeStructure = timeStructure(1:step);
+
+    modelPrice = obj.priceSwaptionG1PP( ...
+        point.strike, ...
+        point.expiry, ...
+        point.paymentDates, ...
+        a, ...
+        volVector, ...
+        volTimeStructure, ...
+        'direction', point.direction, ...
+        'notional', point.notional);
+
+    switch args.objectiveType
+        case 'price'
+            scale = 1.0;
+        otherwise
+            scale = max(point.notional * point.annuity, 1e-12);
+    end
+
+    residual = (modelPrice - point.marketPrice) / scale;
+
+    if ~isfinite(residual)
+        residual = 1e6;
+    end
+end
+```
+
+```matlab
+function point = buildCalibrationPointFromSurface(obj, surfacePack, pricers, row, col, args)
+    % G2++ Calibration Helper: Builds one market calibration point from the
+    % normalized volatility surface.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+        row (1,1) double;
+        col (1,1) double;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+    end
+
+    swapStartDate = surfacePack.startSwapDates(row, col);
+    matSwapDate = surfacePack.matSwapDates(row, col);
+    exerciseDate = surfacePack.expiryDates(row);
+    marketVol = surfacePack.volMatrix(row, col);
+
+    irs = copy(args.irs(1));
+    irs.setNotional(args.notional);
+    irs.setDates(swapStartDate, matSwapDate);
+
+    [npv, ~, ~] = pricers.swap.IRSVanille(irs, ...
+        'measures', true, ...
+        'details', true);
+
+    if isempty(surfacePack.strikes)
+        strike = npv.FairSwapRate;
+    else
+        strike = surfacePack.strikes(row, col);
+    end
+
+    direction = obj.swaptionDirection(strike, npv.FairSwapRate);
+    irs.direction = direction;
+
+    swaption = Swaption(irs, ...
+        'exerciseDate', exerciseDate, ...
+        'strike', strike, ...
+        'settleType', args.settleType);
+
+    [~, fixedLegPDates, ~] = irs.fixedLeg01(swapStartDate);
+
+    fixedLegPDates = fixedLegPDates(:).';
+
+    paymentDates = yearfracExtend( ...
+        surfacePack.pricingDateNum, ...
+        fixedLegPDates(2:end), ...
+        obj.basis);
+
+    paymentDates = paymentDates(:).';
+
+    tenorsDt = yearfracExtend( ...
+        fixedLegPDates(1:end-1), ...
+        fixedLegPDates(2:end), ...
+        swaption.irs.fixedLeg.interestDCC);
+
+    tenorsDt = tenorsDt(:).';
+
+    [marketPrice, ~, annuity, bachelierVol] = pricers.bachelier.Swaption( ...
+        swaption, ...
+        'measures', false, ...
+        'vol', marketVol, ...
+        'irsRes', npv);
+
+    point = struct();
+    point.row = row;
+    point.col = col;
+
+    point.irs = irs;
+    point.swaption = swaption;
+    point.npv = npv;
+
+    point.expiryDate = exerciseDate;
+    point.expiry = surfacePack.expiryDatesYr(row);
+    point.swapStartDate = swapStartDate;
+    point.matSwapDate = matSwapDate;
+
+    point.paymentDates = paymentDates;
+    point.tenorsDt = tenorsDt;
+    point.fixedLegPDates = fixedLegPDates;
+
+    point.strike = strike;
+    point.direction = direction;
+    point.notional = args.notional;
+
+    point.marketVol = marketVol;
+    point.bachelierVol = bachelierVol;
+    point.marketPrice = marketPrice;
+    point.annuity = annuity;
+
+    point.weight = surfacePack.weights(row, col);
+end
+```
+
+Now the stateful G1++ pricing block.
+
+```matlab
+function price = priceSwaptionG1PP(obj, strike, expiry, paymentDates, a, volVector, volTimeStructure, args)
+    % G2++ Calibration Helper: Prices a European swaption under G1++.
+    % This method temporarily maps the object to one-factor mode, reuses
+    % existing G2++ bucket/variance helpers, then restores the original state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        expiry (1,1) double;
+        paymentDates (1,:) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    oldState = obj.setTemporaryG1PPState(a, volVector, volTimeStructure);
+
+    try
+        basket = obj.getBondBasketG1PP(expiry, paymentDates);
+        gaussian = obj.getStateGaussianG1PP(expiry);
+
+        price = obj.priceFromG1PPBasket( ...
+            strike, expiry, paymentDates, basket, gaussian, ...
+            'direction', args.direction, ...
+            'notional', args.notional);
+
+        obj.restoreG1PPState(oldState);
+
+    catch ME
+        obj.restoreG1PPState(oldState);
+        rethrow(ME);
+    end
+end
+```
+
+```matlab
+function oldState = setTemporaryG1PPState(obj, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Saves current G2++ state and sets temporary
+    % one-factor G1++ state on the x-factor.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    oldState = struct();
+
+    oldState.meanReversion_x = obj.meanReversion_x;
+    oldState.meanReversion_y = obj.meanReversion_y;
+    oldState.volatility_sigma = obj.volatility_sigma;
+    oldState.volatility_eta = obj.volatility_eta;
+    oldState.volatilityTimeStructure = obj.volatilityTimeStructure;
+    oldState.volatilityTimeStructureDt = obj.volatilityTimeStructureDt;
+    oldState.correlation = obj.correlation;
+
+    obj.meanReversion_x = a;
+    obj.meanReversion_y = a;
+
+    obj.volatility_sigma = volVector(:).';
+    obj.volatility_eta = zeros(size(obj.volatility_sigma));
+
+    obj.volatilityTimeStructure = volTimeStructure(:).';
+    obj.volatilityTimeStructureDt = [];
+
+    obj.correlation = 0.0;
+end
+```
+
+```matlab
+function restoreG1PPState(obj, oldState)
+    % G2++ Calibration Helper: Restores model state after temporary G1++ pricing.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        oldState (1,1) struct;
+    end
+
+    obj.meanReversion_x = oldState.meanReversion_x;
+    obj.meanReversion_y = oldState.meanReversion_y;
+    obj.volatility_sigma = oldState.volatility_sigma;
+    obj.volatility_eta = oldState.volatility_eta;
+    obj.volatilityTimeStructure = oldState.volatilityTimeStructure;
+    obj.volatilityTimeStructureDt = oldState.volatilityTimeStructureDt;
+    obj.correlation = oldState.correlation;
+end
+```
+
+```matlab
+function basket = getBondBasketG1PP(obj, expiry, paymentDates)
+    % G2++ Calibration Helper: Builds the one-factor affine bond basket.
+    % Assumes the object is already in temporary G1++ state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        expiry (1,1) double;
+        paymentDates (1,:) double;
+    end
+
+    paymentDates = paymentDates(:);
+
+    zc = obj.getInitialMarketZC([expiry, paymentDates.']);
+    zc = zc(:);
+
+    P0T0 = zc(1);
+    P0Ti = zc(2:end);
+
+    B0Ti = obj.getH(obj.meanReversion_x, paymentDates - expiry);
+
+    var0T0 = obj.variXOnly(0, expiry);
+
+    varT0Ti = zeros(numel(paymentDates), 1);
+    var0Ti = zeros(numel(paymentDates), 1);
+
+    for i = 1:numel(paymentDates)
+        Ti = paymentDates(i);
+        varT0Ti(i) = obj.variXOnly(expiry, Ti);
+        var0Ti(i) = obj.variXOnly(0, Ti);
+    end
+
+    A0Ti = (P0Ti ./ P0T0) .* exp(0.5 .* (varT0Ti - var0Ti + var0T0));
+
+    basket = struct();
+    basket.P0T0 = P0T0;
+    basket.P0Ti = P0Ti;
+    basket.A0Ti = A0Ti(:);
+    basket.B0Ti = B0Ti(:);
+end
+```
+
+```matlab
+function output = variXOnly(obj, startDate, endDate)
+    % G2++ Calibration Helper: One-factor integrated variance using the
+    % existing x-factor variance contribution.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate (1,1) double;
+    end
+
+    output = sum(obj.variX(startDate, endDate));
+end
+```
+
+```matlab
+function gaussian = getStateGaussianG1PP(obj, expiry)
+    % G2++ Calibration Helper: Computes the law of X_T under the T-forward
+    % measure in temporary G1++ state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        expiry (1,1) double;
+    end
+
+    gaussian = struct();
+    gaussian.muX = obj.meanForwardG1PP(0, expiry);
+    gaussian.varX = obj.varTForward(0, expiry, 'process', 'x_process');
+end
+```
+
+```matlab
+function output = meanForwardG1PP(obj, startDate, endDate)
+    % G2++ Calibration Helper: Mean of X(endDate) under the endDate-forward
+    % measure in temporary G1++ state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate (1,1) double;
+    end
+
+    idx = obj.getPricingIdx(startDate, endDate);
+
+    deltaLeft = obj.deltaTLeft(startDate, endDate);
+    deltaRight = obj.deltaTRight(startDate, endDate);
+
+    deltaLeft = deltaLeft(:);
+    deltaRight = deltaRight(:);
+
+    sigma = obj.volatility_sigma(idx);
+    sigma = sigma(:);
+
+    a = obj.meanReversion_x;
+
+    expA = obj.getExpDiff(a, deltaLeft, deltaRight);
+    exp2A = obj.getExpDiff(2*a, deltaLeft, deltaRight);
+
+    output = sum( ...
+        -(sigma.^2 ./ a.^2) .* expA ...
+        + (sigma.^2 ./ (2*a.^2)) .* exp2A);
+end
+```
+
+```matlab
+function xBar = solveXBarG1PP(obj, lambda, B)
+    % G2++ Calibration Helper: Solves the one-factor exercise boundary.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        lambda (:,1) double;
+        B (:,1) double;
+    end
+
+    %#ok<INUSD>
+
+    lambda = lambda(:);
+    B = B(:);
+
+    f = @(x) 1 - sum(lambda .* exp(-B .* x));
+
+    lo = -0.10;
+    hi =  0.10;
+
+    flo = f(lo);
+    fhi = f(hi);
+
+    k = 0;
+
+    while flo * fhi > 0 && k < 40
+        width = hi - lo;
+
+        lo = lo - 2 * width;
+        hi = hi + 2 * width;
+
+        flo = f(lo);
+        fhi = f(hi);
+
+        k = k + 1;
+    end
+
+    if flo * fhi > 0
+        xBar = NaN;
+        return
+    end
+
+    xBar = fzero(f, [lo, hi]);
+end
+```
+
+```matlab
+function price = priceFromG1PPBasket(obj, strike, expiry, paymentDates, basket, gaussian, args)
+    % G2++ Calibration Helper: Computes the closed-form one-factor Gaussian
+    % swaption price from a prepared bond basket and Gaussian state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        expiry (1,1) double;
+        paymentDates (1,:) double;
+        basket (1,1) struct;
+        gaussian (1,1) struct;
+
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    %#ok<INUSL>
+
+    paymentDates = paymentDates(:);
+
+    delta = diff([expiry; paymentDates]);
+
+    coeffs = strike .* delta;
+    coeffs(end) = coeffs(end) + 1.0;
+
+    lambda = coeffs .* basket.A0Ti(:);
+    B = basket.B0Ti(:);
+
+    xBar = obj.solveXBarG1PP(lambda, B);
+
+    if ~isfinite(xBar)
+        price = NaN;
+        return
+    end
+
+    muX = gaussian.muX;
+    varX = gaussian.varX;
+    sigX = sqrt(max(varX, 0));
+
+    if sigX <= 0
+        basketValue = sum(lambda .* exp(-B .* muX));
+
+        if strcmpi(args.direction, 'PAY')
+            payoff = max(1 - basketValue, 0);
+        else
+            payoff = max(basketValue - 1, 0);
+        end
+
+        price = args.notional .* basket.P0T0 .* payoff;
+        return
+    end
+
+    h0 = (xBar - muX) ./ sigX;
+    h1 = h0 + B .* sigX;
+    kappa = -B .* muX + 0.5 .* (B.^2) .* varX;
+
+    if strcmpi(args.direction, 'PAY')
+        expectation = normcdf(-h0) - sum(lambda .* exp(kappa) .* normcdf(-h1));
+    else
+        expectation = sum(lambda .* exp(kappa) .* normcdf(h1)) - normcdf(h0);
+    end
+
+    price = args.notional .* basket.P0T0 .* max(expectation, 0);
+end
+```
+
+Typical call:
+
+```matlab
+g1Global = obj.calibrateGlobalG1PP(surfacePack, pricers);
+
+sigmaShapePack = obj.bootstrapSliceG1PP( ...
+    surfacePack, pricers, g1Global, ...
+    'tenorIdx', xg2ppState.shortTenorIdx, ...
+    'shapeName', 'sigma');
+
+etaShapePack = obj.bootstrapSliceG1PP( ...
+    surfacePack, pricers, g1Global, ...
+    'tenorIdx', xg2ppState.longTenorIdx, ...
+    'shapeName', 'eta');
+```
+
 
 
 ---
-Powered by [ChatGPT Exporter](https://www.chatgptexporter.com)
+
