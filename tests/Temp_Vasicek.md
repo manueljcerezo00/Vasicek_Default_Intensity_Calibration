@@ -1059,6 +1059,2380 @@ args.etaShape   = etaShapeFromLongTenorG1PP;
 Then validate the Bonino Step 3 G2++ layer independently.
 
 
+# Calibration Pipeline Review
+
+> **Clarifying setup for helper architecture**
+>
+> I'll focus on setting up the architecture for the helpers. The user mentioned a reference to a PDF ("Bonino style"), which may need to be cited if relevant. I don't need to use web searches, and there's no need for personal context. I'll set up the names and define their responsibilities, maybe using skeleton function signatures but without full code yet, as it's a first iteration.
+>
+> **Clarifying citation process for pipeline and G2++ kernel**
+>
+> I need to mention the staged pipeline and G2++ kernel after shapes are prepared. Regarding the citation, I’m unsure about including the PDF lines. The search result didn’t give line markers. Usually, file search citations should include line ranges, but since we don’t have those, I’ll need to fetch them manually.
+>
+> **Clarifying citation pointer**
+>
+> Oops, I think I need to correct the pointer to "turn" for the citation. The results in [56] might include "turn6file0." It could be a good idea to try using "6:0" as the pointer or perhaps click through manually to confirm the exact line references.
+>
+> Thought for 13s
+
+Good. We freeze the orchestrator. We define only the **SETUP helper contracts**.
+
+The XG2++ setup must prepare clean structures; it must not calibrate, price G2++, or mutate model volatility except where explicitly stated. This matches the staged architecture in the brief: market preparation first, then one-factor initialization, then two-factor reduced calibration; the G2++ pricing kernel comes only after volatility shapes are prepared. `README2 (1).pdf`
+
+```text
+XG2++ SETUP HELPERS
+│
+├─ buildPricersG2PP
+│     → production pricing handles
+│
+├─ buildVolSurfacePackXG2PP
+│     → normalized market surface
+│
+└─ initCalibXG2PP
+      → calibration control/state before G1++ and G2++
+```
+
+# 1. `buildPricersG2PP`
+
+## Responsibility
+
+Build the pricing engines required by calibration.
+
+```text
+buildPricersG2PP
+│
+├─ PricingDCF(obj.DCF)
+│     → IRS deterministic pricing
+│     → fair swap rate
+│     → annuity / leg details if needed
+│
+├─ BachelierModel(obj.swaptionVolCube, obj.DCF.discount, obj.DCF.forecast)
+│     → market quote convention
+│
+└─ PricingBachelierModel
+      → market swaption target price
+```
+
+## Output contract
+
+```matlab
+pricers.swap
+pricers.bachelierModel
+pricers.bachelier
+```
+
+Optional later:
+
+```matlab
+pricers.swapAlt
+```
+
+for strike-adjustment cases with alternative forecast/discount curves.
+
+## Boundary
+
+This helper should not build IRS, swaptions, or calibration instruments.
+
+It only returns engines.
+
+---
+
+# 2. `buildVolSurfacePackXG2PP`
+
+## Responsibility
+
+Normalize the swaption cube/surface into a simple calibration data object.
+
+This corresponds to the market-normalization block in the brief: cube/surface $\rightarrow$ expiry dates, tenors, maturities, vol matrix, optional strikes, optional weights. `README2 (1).pdf`
+
+```text
+buildVolSurfacePackXG2PP
+│
+├─ input
+│     → obj.swaptionVolCube
+│     → moneyness
+│     → optional extraction policy
+│
+├─ extract
+│     → vol surface
+│     → expiries
+│     → tenors
+│     → startSwapDates
+│     → matSwapDates
+│
+├─ normalize dates
+│     → pricingDateNum
+│     → expiryDatesYr
+│     → startSwapDatesYr
+│     → matSwapDatesYr
+│     → tenorsYr
+│
+└─ validate
+      → finite vol entries
+      → dimension consistency
+      → maturity > start > expiry
+```
+
+## Output contract
+
+```matlab
+surfacePack.moneyness
+surfacePack.volMatrix
+
+surfacePack.expiryDates
+surfacePack.expiryDatesYr
+
+surfacePack.tenors
+surfacePack.tenorsYr
+
+surfacePack.startSwapDates
+surfacePack.startSwapDatesYr
+
+surfacePack.matSwapDates
+surfacePack.matSwapDatesYr
+
+surfacePack.nbExpiries
+surfacePack.nbTenors
+surfacePack.nbQuotes
+
+surfacePack.validMask
+surfacePack.quoteRows
+surfacePack.quoteCols
+```
+
+Optional, not mandatory in first version:
+
+```matlab
+surfacePack.weights
+surfacePack.strikes
+surfacePack.volType
+surfacePack.shift
+```
+
+## Boundary
+
+This helper should not construct `IRSVanille`.
+
+It should not construct `Swaption`.
+
+It should not call the Bachelier pricer.
+
+It should only produce market geometry.
+
+---
+
+# 3. `initCalibXG2PP`
+
+## Responsibility
+
+Build the control state for the XG2++ procedure.
+
+```text
+initCalibXG2PP
+│
+├─ choose slices
+│     → short-tenor slice
+│     → long-tenor slice
+│
+├─ initialize parameter controls
+│     → initial a, b
+│     → initial rho
+│     → initial scaling parameters
+│
+├─ initialize bounds
+│     → mean reversion bounds
+│     → volatility scale bounds
+│     → rho bounds
+│
+├─ initialize solver options
+│     → global G1++ options
+│     → slice bootstrap options
+│     → scaled G2++ options
+│
+└─ carry previous inputs
+      → already computed sigma shape
+      → already computed eta shape
+      → cached starts if any
+```
+
+## Output contract
+
+```matlab
+xg2ppState.mode
+
+xg2ppState.shortTenorIdx
+xg2ppState.longTenorIdx
+xg2ppState.shortTenor
+xg2ppState.longTenor
+
+xg2ppState.initial.a
+xg2ppState.initial.b
+xg2ppState.initial.rho
+xg2ppState.initial.alphaSigma
+xg2ppState.initial.alphaEta
+
+xg2ppState.bounds.lower
+xg2ppState.bounds.upper
+
+xg2ppState.options.globalG1PP
+xg2ppState.options.sliceBootstrap
+xg2ppState.options.scaledG2PP
+
+xg2ppState.previous.sigmaShape
+xg2ppState.previous.etaShape
+xg2ppState.previous.theta
+```
+
+## Boundary
+
+This helper should not calibrate the global G1++ model.
+
+It should not bootstrap the two slices.
+
+It should not set `obj.volatility_sigma` or `obj.volatility_eta`.
+
+It only prepares the **control object**.
+
+---
+
+# 4. First setup architecture
+
+```text
+SETUP
+│
+├─ buildPricersG2PP
+│   │
+│   ├─ pricers.swap
+│   ├─ pricers.bachelierModel
+│   └─ pricers.bachelier
+│
+├─ buildVolSurfacePackXG2PP
+│   │
+│   ├─ surfacePack.volMatrix
+│   ├─ surfacePack.expiryDates / expiryDatesYr
+│   ├─ surfacePack.tenors / tenorsYr
+│   ├─ surfacePack.startSwapDates / startSwapDatesYr
+│   ├─ surfacePack.matSwapDates / matSwapDatesYr
+│   ├─ surfacePack.validMask
+│   └─ surfacePack.quoteRows / quoteCols
+│
+└─ initCalibXG2PP
+    │
+    ├─ xg2ppState.mode
+    ├─ xg2ppState.shortTenorIdx
+    ├─ xg2ppState.longTenorIdx
+    ├─ xg2ppState.initial
+    ├─ xg2ppState.bounds
+    ├─ xg2ppState.options
+    └─ xg2ppState.previous
+```
+
+# 5. Minimal call order
+
+```matlab
+pricers = obj.buildPricersG2PP();
+
+surfacePack = obj.buildVolSurfacePackXG2PP( ...
+    calibMoneyness);
+
+xg2ppState = obj.initCalibXG2PP( ...
+    surfacePack, ...
+    args);
+```
+
+After this setup, nothing has been calibrated yet.
+
+The next block will be:
+
+```text
+GLOBAL G1++ INITIALIZATION
+│
+├─ calibrateGlobalG1PPXG2PP
+├─ bootstrapG1PPSliceXG2PP  short tenor
+└─ bootstrapG1PPSliceXG2PP  long tenor
+```
+
+# 6. Design rule for this block
+
+```text
+buildPricersG2PP
+    owns pricing-engine construction.
+
+buildVolSurfacePackXG2PP
+    owns market geometry.
+
+initCalibXG2PP
+    owns calibration controls.
+
+None of them owns G2++ pricing.
+None of them owns optimization.
+None of them owns final parameter commitment.
+```
+
+## Response:
+5/15/2026, 12:24:51 PM
+
+> **Considering code structure for user request**
+>
+> The user asked for code for each helper. I’ll likely need to provide MATLAB code in full, which includes these three functions: `buildPricersG2PP`, `buildVolSurfacePackXG2PP`, and `initCalibXG2PP`. I should also consider including the `getPricingDateNum` helper but avoid the file search unless it's necessary for citations. Let's structure and keep it concise.
+>
+> **Structuring MATLAB functions inside class methods**
+>
+> MATLAB allows nested functions within the main function block, even inside class methods, so that should work. The user likely wants these inside class methods, not externally. Since they may already have `getPricingDateNum`, I can reference `obj.getPricingDateNum` without including it. I'll clarify that it’s necessary for robustness and mention the required arguments for `initCalibXG2PP`.
+>
+> **Deciding on citation and argument structure for code**
+>
+> For the code, I’ll use a default `0` if necessary, and adjust for objects that don’t have `extractSurface` with an error catch. Regarding arguments, I'll ensure to use `char` for string validation and avoid citations. Since this is just the code, citations aren’t needed unless referencing the design.
+>
+> Thought for 1m 1s
+
+Paste these inside `methods` of `GaussianTwoFactors`.
+
+```matlab
+function pricers = buildPricersG2PP(obj, args)
+    % G2++ Setup Helper: Builds production pricing engines needed by the
+    % calibration pipeline.
+    %
+    % OUTPUT:
+    % pricers.swap           | PricingDCF             : deterministic IRS pricer
+    % pricers.bachelierModel | BachelierModel         : market quote model
+    % pricers.bachelier      | PricingBachelierModel  : market swaption pricer
+    % pricers.swapAlt        | PricingDCF / []        : optional alternative DCF pricer
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        args.discount = [];
+        args.forecast = [];
+    end
+
+    pricers = struct();
+
+    % Main DCF pricer, aligned with the model DCF.
+    pricers.swap = PricingDCF(obj.DCF);
+
+    % Optional alternative DCF pricer, kept for future strike-adjustment cases.
+    pricers.swapAlt = [];
+
+    if ~isempty(args.discount) && ~isempty(args.forecast)
+        pricers.swapAlt = PricingDCF(DCFModel(args.discount, args.forecast));
+
+    elseif ~isempty(args.discount)
+        pricers.swapAlt = PricingDCF(DCFModel(args.discount));
+
+    elseif ~isempty(args.forecast)
+        pricers.swapAlt = PricingDCF(DCFModel(args.forecast));
+    end
+
+    if isempty(obj.swaptionVolCube)
+        error("obj.swaptionVolCube must be defined before building Bachelier pricer.");
+    end
+
+    % Bachelier pricer used to convert market vol quotes into target prices.
+    pricers.bachelierModel = BachelierModel( ...
+        obj.swaptionVolCube, ...
+        obj.DCF.discount, ...
+        obj.DCF.forecast);
+
+    pricers.bachelier = PricingBachelierModel(pricers.bachelierModel);
+end
+```
+
+```matlab
+function surfacePack = buildVolSurfacePackXG2PP(obj, calibMoneyness, args)
+    % G2++ Setup Helper: Extracts and normalizes a swaption volatility
+    % surface from the cube for XG2++ calibration.
+    %
+    % INPUT:
+    % calibMoneyness | double | scalar : moneyness slice, default ATM = 0
+    %
+    % OUTPUT:
+    % surfacePack | struct : normalized market surface geometry and quotes
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        calibMoneyness double = 0;
+        args.dimension (1,:) char = 'moneyness';
+        args.weights = [];
+        args.strikes = [];
+        args.validate (1,1) logical = true;
+    end
+
+    if isempty(calibMoneyness)
+        calibMoneyness = 0;
+    end
+
+    if isempty(obj.swaptionVolCube)
+        error("obj.swaptionVolCube is empty. Cannot build XG2++ surface pack.");
+    end
+
+    pricingDateNum = obj.getPricingDateNum(obj.pricingDate);
+
+    % Extract surface from the production cube.
+    try
+        rawSurface = obj.swaptionVolCube.extractSurface( ...
+            'dimension', args.dimension, ...
+            'value', calibMoneyness);
+    catch ME
+        error("Could not extract swaption surface from cube: %s", ME.message);
+    end
+
+    % Read core fields, robustly accepting struct or object output.
+    moneyness = readField(rawSurface, {'moneyness'}, false);
+    if isempty(moneyness)
+        moneyness = calibMoneyness;
+    end
+
+    volMatrix = readField(rawSurface, {'vol', 'volMatrix'}, true);
+
+    expiryDates = readField(rawSurface, ...
+        {'expiriesDates', 'expiryDates', 'exerciseDates'}, true);
+
+    tenors = readField(rawSurface, {'tenors', 'swapTenors'}, true);
+
+    startSwapDates = readField(rawSurface, ...
+        {'startSwapDates', 'swapStartDates', 'deliveryDates'}, true);
+
+    matSwapDates = readField(rawSurface, ...
+        {'matSwapDates', 'maturityDates', 'swapsMaturities'}, true);
+
+    expiryDates = expiryDates(:);
+    tenors = tenors(:);
+
+    nbExpiries = numel(expiryDates);
+    nbTenors = numel(tenors);
+
+    if size(volMatrix,1) ~= nbExpiries || size(volMatrix,2) ~= nbTenors
+        error("volMatrix size must be nbExpiries x nbTenors.");
+    end
+
+    if ~isequal(size(startSwapDates), size(volMatrix))
+        error("startSwapDates must have the same size as volMatrix.");
+    end
+
+    if ~isequal(size(matSwapDates), size(volMatrix))
+        error("matSwapDates must have the same size as volMatrix.");
+    end
+
+    % Convert dates to year fractions from pricing date.
+    expiryDatesYr = yearfracExtend(pricingDateNum, expiryDates, obj.basis);
+    expiryDatesYr = expiryDatesYr(:);
+
+    startSwapDatesYr = yearfracExtend(pricingDateNum, startSwapDates, obj.basis);
+    matSwapDatesYr   = yearfracExtend(pricingDateNum, matSwapDates, obj.basis);
+
+    tenorsYr = parseTenorVector(tenors);
+    tenorsYr = tenorsYr(:);
+
+    % Quote mask.
+    validMask = isfinite(volMatrix);
+    [quoteRows, quoteCols] = find(validMask);
+    quoteValues = volMatrix(validMask);
+
+    % Optional weights.
+    if isempty(args.weights)
+        weights = ones(size(volMatrix));
+    elseif isscalar(args.weights)
+        weights = args.weights .* ones(size(volMatrix));
+    else
+        weights = args.weights;
+        if ~isequal(size(weights), size(volMatrix))
+            error("weights must be scalar or have the same size as volMatrix.");
+        end
+    end
+
+    % Optional strikes.
+    strikes = args.strikes;
+    if ~isempty(strikes) && ~isequal(size(strikes), size(volMatrix))
+        error("strikes must be empty or have the same size as volMatrix.");
+    end
+
+    if args.validate
+        expiryMat = repmat(expiryDates(:), 1, nbTenors);
+
+        if any(startSwapDates(:) <= expiryMat(:))
+            error("Each swap start date must be strictly after the swaption expiry.");
+        end
+
+        if any(matSwapDates(:) <= startSwapDates(:))
+            error("Each swap maturity date must be strictly after the swap start date.");
+        end
+
+        if nnz(validMask) == 0
+            error("No finite volatility quote found in extracted surface.");
+        end
+
+        if any(~isfinite(expiryDatesYr))
+            error("Non-finite expiry year fraction detected.");
+        end
+
+        if any(~isfinite(tenorsYr))
+            error("Non-finite tenor year fraction detected.");
+        end
+    end
+
+    % Main output pack.
+    surfacePack = struct();
+
+    surfacePack.moneyness = moneyness;
+    surfacePack.volMatrix = volMatrix;
+
+    surfacePack.expiryDates = expiryDates;
+    surfacePack.expiryDatesYr = expiryDatesYr;
+
+    surfacePack.tenors = tenors;
+    surfacePack.tenorsYr = tenorsYr;
+
+    surfacePack.startSwapDates = startSwapDates;
+    surfacePack.startSwapDatesYr = startSwapDatesYr;
+
+    surfacePack.matSwapDates = matSwapDates;
+    surfacePack.matSwapDatesYr = matSwapDatesYr;
+
+    surfacePack.weights = weights;
+    surfacePack.strikes = strikes;
+
+    surfacePack.validMask = validMask;
+    surfacePack.quoteRows = quoteRows;
+    surfacePack.quoteCols = quoteCols;
+    surfacePack.quoteValues = quoteValues;
+
+    surfacePack.nbExpiries = nbExpiries;
+    surfacePack.nbTenors = nbTenors;
+    surfacePack.nbQuotes = nnz(validMask);
+
+    surfacePack.pricingDateNum = pricingDateNum;
+    surfacePack.basis = obj.basis;
+
+    % -------- nested utilities --------
+
+    function value = readField(source, names, required)
+        value = [];
+
+        for k = 1:numel(names)
+            name = names{k};
+
+            if isstruct(source) && isfield(source, name)
+                value = source.(name);
+                return;
+            end
+
+            if isobject(source) && isprop(source, name)
+                value = source.(name);
+                return;
+            end
+        end
+
+        if required
+            error("Missing required field/property: %s", strjoin(names, " / "));
+        end
+    end
+
+    function tenorYears = parseTenorVector(tenorInput)
+        if isnumeric(tenorInput)
+            tenorYears = tenorInput(:);
+            return;
+        end
+
+        if isstring(tenorInput)
+            tenorInput = cellstr(tenorInput(:));
+        elseif iscell(tenorInput)
+            tenorInput = tenorInput(:);
+        else
+            error("Unsupported tenor format.");
+        end
+
+        tenorYears = NaN(numel(tenorInput), 1);
+
+        for kk = 1:numel(tenorInput)
+            tenorYears(kk) = parseSingleTenor(tenorInput{kk});
+        end
+    end
+
+    function y = parseSingleTenor(x)
+        if isnumeric(x)
+            y = double(x);
+            return;
+        end
+
+        txt = strtrim(char(x));
+
+        token = regexp(txt, '^([0-9]*\.?[0-9]+)\s*([DdWwMmYy]?)$', ...
+            'tokens', 'once');
+
+        if isempty(token)
+            error("Could not parse tenor: %s", txt);
+        end
+
+        value = str2double(token{1});
+        unit = upper(token{2});
+
+        switch unit
+            case {'', 'Y'}
+                y = value;
+            case 'M'
+                y = value / 12;
+            case 'W'
+                y = value / 52;
+            case 'D'
+                y = value / 365;
+            otherwise
+                error("Unsupported tenor unit: %s", unit);
+        end
+    end
+end
+```
+
+```matlab
+function xg2ppState = initCalibXG2PP(obj, surfacePack, args)
+    % G2++ Setup Helper: Initializes the XG2++ calibration control state.
+    %
+    % The function does not calibrate, does not price, and does not mutate
+    % the model volatility state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+
+        args.mode (1,:) char = 'scaledSurface';
+
+        args.shortTenorIdx (1,1) double = NaN;
+        args.longTenorIdx  (1,1) double = NaN;
+
+        args.initialA (1,1) double = NaN;
+        args.initialB (1,1) double = NaN;
+        args.initialRho (1,1) double = -0.50;
+        args.initialAlphaSigma (1,1) double = 1.00;
+        args.initialAlphaEta   (1,1) double = 1.00;
+
+        args.aLower (1,1) double = 1e-4;
+        args.aUpper (1,1) double = 5.0;
+        args.bLower (1,1) double = 1e-4;
+        args.bUpper (1,1) double = 5.0;
+
+        args.rhoLower (1,1) double = -0.999;
+        args.rhoUpper (1,1) double =  0.999;
+
+        args.alphaSigmaLower (1,1) double = 1e-4;
+        args.alphaSigmaUpper (1,1) double = 10.0;
+        args.alphaEtaLower   (1,1) double = 1e-4;
+        args.alphaEtaUpper   (1,1) double = 10.0;
+
+        args.globalG1PPOptions = [];
+        args.sliceBootstrapOptions = [];
+        args.scaledG2PPOptions = [];
+
+        args.alreadyComputedSigmaShape (:,1) double = [];
+        args.alreadyComputedEtaShape   (:,1) double = [];
+        args.previousTheta (:,1) double = [];
+
+        args.terminalPolicy (1,:) char = 'flatLast';
+        args.localMode (1,:) char = 'scaled';
+    end
+
+    requiredFields = ["volMatrix", "tenorsYr", "validMask", ...
+                      "nbExpiries", "nbTenors", "nbQuotes"];
+
+    for k = 1:numel(requiredFields)
+        if ~isfield(surfacePack, requiredFields(k))
+            error("surfacePack is missing required field: %s", requiredFields(k));
+        end
+    end
+
+    tenorsYr = surfacePack.tenorsYr(:);
+    validMask = surfacePack.validMask;
+
+    if numel(tenorsYr) ~= surfacePack.nbTenors
+        error("surfacePack.tenorsYr must have length nbTenors.");
+    end
+
+    if ~isequal(size(validMask), size(surfacePack.volMatrix))
+        error("surfacePack.validMask must have the same size as volMatrix.");
+    end
+
+    % Select short and long tenor columns.
+    shortIdx = args.shortTenorIdx;
+    longIdx  = args.longTenorIdx;
+
+    validTenorCols = find(any(validMask, 1));
+
+    if isempty(validTenorCols)
+        error("No tenor column contains finite market quotes.");
+    end
+
+    if isnan(shortIdx)
+        shortIdx = validTenorCols(1);
+    end
+
+    if isnan(longIdx)
+        longIdx = validTenorCols(end);
+    end
+
+    if shortIdx < 1 || shortIdx > surfacePack.nbTenors
+        error("shortTenorIdx is outside the tenor grid.");
+    end
+
+    if longIdx < 1 || longIdx > surfacePack.nbTenors
+        error("longTenorIdx is outside the tenor grid.");
+    end
+
+    if ~any(validMask(:, shortIdx))
+        error("Selected shortTenorIdx contains no finite market quotes.");
+    end
+
+    if ~any(validMask(:, longIdx))
+        error("Selected longTenorIdx contains no finite market quotes.");
+    end
+
+    % Initial mean reversions.
+    initialA = args.initialA;
+    initialB = args.initialB;
+
+    if isnan(initialA)
+        initialA = safePositiveDefault(obj.meanReversion_x, 0.10);
+    end
+
+    if isnan(initialB)
+        initialB = safePositiveDefault(obj.meanReversion_y, 0.03);
+    end
+
+    if initialA <= 0 || initialB <= 0
+        error("Initial mean reversions must be strictly positive.");
+    end
+
+    if abs(args.initialRho) >= 1
+        error("initialRho must satisfy abs(initialRho) < 1.");
+    end
+
+    if args.aLower <= 0 || args.bLower <= 0
+        error("Mean-reversion lower bounds must be strictly positive.");
+    end
+
+    if args.aLower >= args.aUpper
+        error("Invalid bounds: aLower must be smaller than aUpper.");
+    end
+
+    if args.bLower >= args.bUpper
+        error("Invalid bounds: bLower must be smaller than bUpper.");
+    end
+
+    if args.rhoLower <= -1 || args.rhoUpper >= 1 || args.rhoLower >= args.rhoUpper
+        error("Invalid rho bounds.");
+    end
+
+    if args.alphaSigmaLower <= 0 || args.alphaEtaLower <= 0
+        error("Volatility scale lower bounds must be strictly positive.");
+    end
+
+    if args.alphaSigmaLower >= args.alphaSigmaUpper
+        error("Invalid alphaSigma bounds.");
+    end
+
+    if args.alphaEtaLower >= args.alphaEtaUpper
+        error("Invalid alphaEta bounds.");
+    end
+
+    % Default solver options.
+    globalG1PPOptions = args.globalG1PPOptions;
+    sliceBootstrapOptions = args.sliceBootstrapOptions;
+    scaledG2PPOptions = args.scaledG2PPOptions;
+
+    if isempty(globalG1PPOptions)
+        globalG1PPOptions = makeFsolveOptions();
+    end
+
+    if isempty(sliceBootstrapOptions)
+        sliceBootstrapOptions = makeFsolveOptions();
+    end
+
+    if isempty(scaledG2PPOptions)
+        scaledG2PPOptions = makeLsqnonlinOptions();
+    end
+
+    thetaNames = ["a"; "b"; "rho"; "alphaSigma"; "alphaEta"];
+
+    theta0 = [
+        initialA
+        initialB
+        args.initialRho
+        args.initialAlphaSigma
+        args.initialAlphaEta
+    ];
+
+    lb = [
+        args.aLower
+        args.bLower
+        args.rhoLower
+        args.alphaSigmaLower
+        args.alphaEtaLower
+    ];
+
+    ub = [
+        args.aUpper
+        args.bUpper
+        args.rhoUpper
+        args.alphaSigmaUpper
+        args.alphaEtaUpper
+    ];
+
+    if any(theta0 < lb) || any(theta0 > ub)
+        error("Initial XG2++ parameter vector is outside bounds.");
+    end
+
+    % Output state.
+    xg2ppState = struct();
+
+    xg2ppState.mode = args.mode;
+    xg2ppState.localMode = args.localMode;
+    xg2ppState.terminalPolicy = args.terminalPolicy;
+
+    xg2ppState.shortTenorIdx = shortIdx;
+    xg2ppState.longTenorIdx = longIdx;
+    xg2ppState.shortTenor = tenorsYr(shortIdx);
+    xg2ppState.longTenor = tenorsYr(longIdx);
+
+    xg2ppState.thetaNames = thetaNames;
+    xg2ppState.theta0 = theta0;
+
+    xg2ppState.initial = struct();
+    xg2ppState.initial.a = initialA;
+    xg2ppState.initial.b = initialB;
+    xg2ppState.initial.rho = args.initialRho;
+    xg2ppState.initial.alphaSigma = args.initialAlphaSigma;
+    xg2ppState.initial.alphaEta = args.initialAlphaEta;
+
+    xg2ppState.bounds = struct();
+    xg2ppState.bounds.lower = lb;
+    xg2ppState.bounds.upper = ub;
+    xg2ppState.bounds.a = [args.aLower, args.aUpper];
+    xg2ppState.bounds.b = [args.bLower, args.bUpper];
+    xg2ppState.bounds.rho = [args.rhoLower, args.rhoUpper];
+    xg2ppState.bounds.alphaSigma = [args.alphaSigmaLower, args.alphaSigmaUpper];
+    xg2ppState.bounds.alphaEta = [args.alphaEtaLower, args.alphaEtaUpper];
+
+    xg2ppState.options = struct();
+    xg2ppState.options.globalG1PP = globalG1PPOptions;
+    xg2ppState.options.sliceBootstrap = sliceBootstrapOptions;
+    xg2ppState.options.scaledG2PP = scaledG2PPOptions;
+
+    xg2ppState.previous = struct();
+    xg2ppState.previous.sigmaShape = args.alreadyComputedSigmaShape(:);
+    xg2ppState.previous.etaShape = args.alreadyComputedEtaShape(:);
+    xg2ppState.previous.theta = args.previousTheta(:);
+
+    xg2ppState.surfaceSize = size(surfacePack.volMatrix);
+    xg2ppState.nbQuotes = surfacePack.nbQuotes;
+    xg2ppState.createdAt = datetime("now");
+
+    % -------- nested utilities --------
+
+    function value = safePositiveDefault(candidate, fallback)
+        if isempty(candidate) || ~isfinite(candidate) || candidate <= 0
+            value = fallback;
+        else
+            value = candidate;
+        end
+    end
+
+    function opt = makeFsolveOptions()
+        try
+            opt = optimoptions(@fsolve, ...
+                'Display', 'none', ...
+                'MaxIterations', 2000, ...
+                'StepTolerance', 1e-8, ...
+                'FunctionTolerance', 1e-8);
+        catch
+            opt = optimset( ...
+                'Display', 'off', ...
+                'MaxIter', 2000, ...
+                'TolX', 1e-8, ...
+                'TolFun', 1e-8);
+        end
+    end
+
+    function opt = makeLsqnonlinOptions()
+        try
+            opt = optimoptions('lsqnonlin', ...
+                'Display', 'none', ...
+                'MaxIterations', 500, ...
+                'StepTolerance', 1e-8, ...
+                'FunctionTolerance', 1e-8, ...
+                'OptimalityTolerance', 1e-8);
+        catch
+            opt = optimset( ...
+                'Display', 'off', ...
+                'MaxIter', 500, ...
+                'TolX', 1e-8, ...
+                'TolFun', 1e-8);
+        end
+    end
+end
+```
+
+Minimal setup call:
+
+```matlab
+pricers = obj.buildPricersG2PP();
+
+surfacePack = obj.buildVolSurfacePackXG2PP(0);
+
+xg2ppState = obj.initCalibXG2PP(surfacePack);
+```
+
+## Response:
+5/15/2026, 12:33:37 PM
+
+Agreed. Better convention for this library:
+
+$$
+\boxed{
+\text{one method = one readable responsibility}
+}
+$$
+
+No nested utilities. Light validation only where failure would be silent or hard to debug.
+
+Use this corrected setup style.
+
+```matlab
+function surfacePack = buildVolSurfacePackXG2PP(obj, calibMoneyness, args)
+    % G2++ Setup Helper: Extracts and formats one swaption volatility
+    % surface for the XG2++ calibration pipeline.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        calibMoneyness double = 0;
+        args.dimension (1,:) char = 'moneyness';
+        args.weights = [];
+        args.strikes = [];
+    end
+
+    if isempty(calibMoneyness)
+        calibMoneyness = 0;
+    end
+
+    pricingDateNum = obj.getPricingDateNum(obj.pricingDate);
+
+    rawSurface = obj.swaptionVolCube.extractSurface( ...
+        'dimension', args.dimension, ...
+        'value', calibMoneyness);
+
+    volMatrix = rawSurface.vol;
+
+    expiryDates = rawSurface.expiriesDates(:);
+    tenors = rawSurface.tenors(:);
+
+    startSwapDates = rawSurface.startSwapDates;
+    matSwapDates = rawSurface.matSwapDates;
+
+    nbExpiries = numel(expiryDates);
+    nbTenors = numel(tenors);
+
+    if size(volMatrix,1) ~= nbExpiries || size(volMatrix,2) ~= nbTenors
+        error("Inconsistent volatility surface dimensions.");
+    end
+
+    expiryDatesYr = yearfracExtend(pricingDateNum, expiryDates, obj.basis);
+    expiryDatesYr = expiryDatesYr(:);
+
+    startSwapDatesYr = yearfracExtend(pricingDateNum, startSwapDates, obj.basis);
+    matSwapDatesYr = yearfracExtend(pricingDateNum, matSwapDates, obj.basis);
+
+    tenorsYr = obj.parseTenorsXG2PP(tenors);
+    tenorsYr = tenorsYr(:);
+
+    validMask = isfinite(volMatrix);
+    [quoteRows, quoteCols] = find(validMask);
+
+    if isempty(args.weights)
+        weights = ones(size(volMatrix));
+    else
+        weights = args.weights;
+    end
+
+    surfacePack = struct();
+
+    surfacePack.moneyness = rawSurface.moneyness;
+    surfacePack.volMatrix = volMatrix;
+
+    surfacePack.expiryDates = expiryDates;
+    surfacePack.expiryDatesYr = expiryDatesYr;
+
+    surfacePack.tenors = tenors;
+    surfacePack.tenorsYr = tenorsYr;
+
+    surfacePack.startSwapDates = startSwapDates;
+    surfacePack.startSwapDatesYr = startSwapDatesYr;
+
+    surfacePack.matSwapDates = matSwapDates;
+    surfacePack.matSwapDatesYr = matSwapDatesYr;
+
+    surfacePack.weights = weights;
+    surfacePack.strikes = args.strikes;
+
+    surfacePack.validMask = validMask;
+    surfacePack.quoteRows = quoteRows;
+    surfacePack.quoteCols = quoteCols;
+    surfacePack.quoteValues = volMatrix(validMask);
+
+    surfacePack.nbExpiries = nbExpiries;
+    surfacePack.nbTenors = nbTenors;
+    surfacePack.nbQuotes = nnz(validMask);
+
+    surfacePack.pricingDateNum = pricingDateNum;
+    surfacePack.basis = obj.basis;
+end
+```
+
+This assumes `rawSurface` follows the production `SwaptionCube.extractSurface` convention. That is better than defensive generic accessors for now.
+
+Add this as a separate helper method, not nested:
+
+```matlab
+function tenorsYr = parseTenorsXG2PP(obj, tenors)
+    % G2++ Setup Helper: Converts tenor labels into year fractions.
+    %#ok<INUSD>
+
+    if isnumeric(tenors)
+        tenorsYr = tenors(:);
+        return;
+    end
+
+    if isstring(tenors)
+        tenors = cellstr(tenors);
+    end
+
+    tenors = tenors(:);
+    tenorsYr = NaN(numel(tenors), 1);
+
+    for k = 1:numel(tenors)
+
+        txt = strtrim(char(tenors{k}));
+
+        token = regexp(txt, '^([0-9]*\.?[0-9]+)\s*([DdWwMmYy]?)$', ...
+            'tokens', 'once');
+
+        if isempty(token)
+            error("Unsupported tenor format: %s", txt);
+        end
+
+        value = str2double(token{1});
+        unit = upper(token{2});
+
+        switch unit
+            case {'', 'Y'}
+                tenorsYr(k) = value;
+            case 'M'
+                tenorsYr(k) = value / 12;
+            case 'W'
+                tenorsYr(k) = value / 52;
+            case 'D'
+                tenorsYr(k) = value / 365;
+            otherwise
+                error("Unsupported tenor unit: %s", unit);
+        end
+    end
+end
+```
+
+And the cleaner state initializer:
+
+```matlab
+function xg2ppState = initCalibXG2PP(obj, surfacePack, args)
+    % G2++ Setup Helper: Initializes the XG2++ calibration control state.
+    % This method prepares controls only. It does not calibrate or mutate
+    % the model volatility state.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+
+        args.mode (1,:) char = 'scaledSurface';
+
+        args.shortTenorIdx (1,1) double = NaN;
+        args.longTenorIdx  (1,1) double = NaN;
+
+        args.initialA (1,1) double = NaN;
+        args.initialB (1,1) double = NaN;
+        args.initialRho (1,1) double = -0.50;
+        args.initialAlphaSigma (1,1) double = 1.00;
+        args.initialAlphaEta   (1,1) double = 1.00;
+
+        args.aLower (1,1) double = 1e-4;
+        args.aUpper (1,1) double = 5.0;
+        args.bLower (1,1) double = 1e-4;
+        args.bUpper (1,1) double = 5.0;
+
+        args.rhoLower (1,1) double = -0.999;
+        args.rhoUpper (1,1) double =  0.999;
+
+        args.alphaSigmaLower (1,1) double = 1e-4;
+        args.alphaSigmaUpper (1,1) double = 10.0;
+        args.alphaEtaLower   (1,1) double = 1e-4;
+        args.alphaEtaUpper   (1,1) double = 10.0;
+
+        args.globalG1PPOptions = [];
+        args.sliceBootstrapOptions = [];
+        args.scaledG2PPOptions = [];
+
+        args.alreadyComputedSigmaShape (:,1) double = [];
+        args.alreadyComputedEtaShape   (:,1) double = [];
+        args.previousTheta (:,1) double = [];
+
+        args.terminalPolicy (1,:) char = 'flatLast';
+        args.localMode (1,:) char = 'scaled';
+    end
+
+    tenorsYr = surfacePack.tenorsYr(:);
+    validMask = surfacePack.validMask;
+
+    validTenorCols = find(any(validMask, 1));
+
+    if isempty(validTenorCols)
+        error("No tenor column contains finite market quotes.");
+    end
+
+    shortIdx = args.shortTenorIdx;
+    longIdx = args.longTenorIdx;
+
+    if isnan(shortIdx)
+        shortIdx = validTenorCols(1);
+    end
+
+    if isnan(longIdx)
+        longIdx = validTenorCols(end);
+    end
+
+    initialA = args.initialA;
+    initialB = args.initialB;
+
+    if isnan(initialA)
+        initialA = obj.meanReversion_x;
+    end
+
+    if isnan(initialB)
+        initialB = obj.meanReversion_y;
+    end
+
+    thetaNames = ["a"; "b"; "rho"; "alphaSigma"; "alphaEta"];
+
+    theta0 = [
+        initialA
+        initialB
+        args.initialRho
+        args.initialAlphaSigma
+        args.initialAlphaEta
+    ];
+
+    lb = [
+        args.aLower
+        args.bLower
+        args.rhoLower
+        args.alphaSigmaLower
+        args.alphaEtaLower
+    ];
+
+    ub = [
+        args.aUpper
+        args.bUpper
+        args.rhoUpper
+        args.alphaSigmaUpper
+        args.alphaEtaUpper
+    ];
+
+    xg2ppState = struct();
+
+    xg2ppState.mode = args.mode;
+    xg2ppState.localMode = args.localMode;
+    xg2ppState.terminalPolicy = args.terminalPolicy;
+
+    xg2ppState.shortTenorIdx = shortIdx;
+    xg2ppState.longTenorIdx = longIdx;
+    xg2ppState.shortTenor = tenorsYr(shortIdx);
+    xg2ppState.longTenor = tenorsYr(longIdx);
+
+    xg2ppState.thetaNames = thetaNames;
+    xg2ppState.theta0 = theta0;
+
+    xg2ppState.initial = struct();
+    xg2ppState.initial.a = initialA;
+    xg2ppState.initial.b = initialB;
+    xg2ppState.initial.rho = args.initialRho;
+    xg2ppState.initial.alphaSigma = args.initialAlphaSigma;
+    xg2ppState.initial.alphaEta = args.initialAlphaEta;
+
+    xg2ppState.bounds = struct();
+    xg2ppState.bounds.lower = lb;
+    xg2ppState.bounds.upper = ub;
+
+    xg2ppState.options = struct();
+    xg2ppState.options.globalG1PP = args.globalG1PPOptions;
+    xg2ppState.options.sliceBootstrap = args.sliceBootstrapOptions;
+    xg2ppState.options.scaledG2PP = args.scaledG2PPOptions;
+
+    xg2ppState.previous = struct();
+    xg2ppState.previous.sigmaShape = args.alreadyComputedSigmaShape(:);
+    xg2ppState.previous.etaShape = args.alreadyComputedEtaShape(:);
+    xg2ppState.previous.theta = args.previousTheta(:);
+
+    xg2ppState.surfaceSize = size(surfacePack.volMatrix);
+    xg2ppState.nbQuotes = surfacePack.nbQuotes;
+end
+```
+
+Main correction: `initCalibXG2PP` now **does not create solver options**. That should be a separate helper later, e.g.
+
+```matlab
+buildSolverOptionsXG2PP
+```
+
+This keeps setup readable and avoids hiding MATLAB optimizer choices inside a state initializer.
+
+## Response:
+5/15/2026, 12:39:47 PM
+
+Good. This stage is the **shape generator**.
+
+It should not touch G2++ yet, except for using the same market surface and the same production market-price adapters.
+
+```text
+ONE-FACTOR INITIALIZATION
+│
+├─ calibrateGlobalG1PP
+│     → full surface constant G1++ fit
+│     → aG1
+│     → sigmaG1
+│     → global residual diagnostics
+│
+├─ bootstrapSliceG1PP
+│     → selected tenor column = short tenor
+│     → fixed / inherited aG1
+│     → piecewise σ-shape
+│     → short-slice diagnostics
+│
+└─ bootstrapSliceG1PP
+      → selected tenor column = long tenor
+      → fixed / inherited aG1
+      → piecewise η-shape
+      → long-slice diagnostics
+```
+
+# 1. Main design choice
+
+For sobriety, I would make `bootstrapSliceG1PP` generic:
+
+```matlab
+sigmaShapePack = obj.bootstrapSliceG1PP(surfacePack, xg2ppState, pricers, ...
+    'tenorIdx', xg2ppState.shortTenorIdx, ...
+    'shapeName', 'sigma');
+
+etaShapePack = obj.bootstrapSliceG1PP(surfacePack, xg2ppState, pricers, ...
+    'tenorIdx', xg2ppState.longTenorIdx, ...
+    'shapeName', 'eta');
+```
+
+So we do **not** create two different methods for short and long.
+
+---
+
+# 2. Method responsibility map
+
+```text
+calibrateGlobalG1PP
+│
+├─ build full calibration set
+│     → all finite quotes in surfacePack
+│
+├─ objective θ = [a, sigma]
+│     → constant-vol one-factor price
+│     → market price
+│     → residual vector
+│
+├─ solve global least squares
+│
+└─ output
+      → aG1
+      → sigmaG1
+      → thetaStar
+      → residuals
+      → model prices
+      → market prices
+```
+
+```text
+bootstrapSliceG1PP
+│
+├─ select one tenor column
+│     → short or long tenor
+│
+├─ loop over expiries k = 1,...,n
+│     │
+│     ├─ build calibration point
+│     │     → IRS
+│     │     → strike
+│     │     → direction
+│     │     → swaptionPack
+│     │     → marketPrice
+│     │
+│     ├─ solve local one-factor volatility σ_k
+│     │     → previous buckets frozen
+│     │     → current bucket optimized
+│     │
+│     └─ store diagnostics
+│
+└─ output
+      → shape vector
+      → time structure
+      → prices
+      → residuals
+      → solver info
+```
+
+# 3. Required lower-level helpers
+
+Before shipping code, the one-factor block needs a few numerical helpers. Keep them separate.
+
+```text
+G1PP NUMERICAL HELPERS
+│
+├─ priceSwaptionG1PP
+│     → one-factor HW/G1++ swaption price
+│     → accepts explicit volatility vector and time structure
+│
+├─ buildCalibrationPointFromSurface
+│     → one surface quote
+│     → IRS + swaptionPack + marketPrice
+│
+├─ residualGlobalG1PP
+│     → vector residual over all finite quotes
+│
+└─ residualBucketG1PP
+      → scalar residual for one slice bucket
+```
+
+The key risk: do not reuse the existing HW1F calibration too blindly unless we know its function accepts explicit volatility vector without mutating unrelated state. In your current architecture, it is safer to build a thin G1++ pricing helper that uses the same closed-form HW1F/G1++ logic but explicit inputs.
+
+---
+
+# 4. Data contracts
+
+## `g1Global`
+
+```matlab
+g1Global.a
+g1Global.sigma
+g1Global.thetaStar
+g1Global.residuals
+g1Global.modelPrices
+g1Global.marketPrices
+g1Global.solverInfo
+```
+
+## `shapePack`
+
+```matlab
+shapePack.name              % 'sigma' or 'eta'
+shapePack.tenorIdx
+shapePack.tenor
+shapePack.timeStructure
+shapePack.timeStructureDt
+shapePack.shape             % piecewise volatility vector
+shapePack.modelPrices
+shapePack.marketPrices
+shapePack.residuals
+shapePack.strikes
+shapePack.directions
+shapePack.solverInfo
+```
+
+# 5. Clean architecture version
+
+```text
+ONE-FACTOR INITIALIZATION
+│
+├─ calibrateGlobalG1PP
+│   │
+│   ├─ buildCalibrationPointFromSurface
+│   │     → for all finite surface quotes
+│   │
+│   ├─ residualGlobalG1PP
+│   │     θ = [a, sigma]
+│   │       ↓
+│   │     constant G1++ volatility state
+│   │       ↓
+│   │     price all one-factor swaptions
+│   │       ↓
+│   │     normalized price residuals
+│   │
+│   └─ solve
+│         → g1Global.a
+│         → g1Global.sigma
+│         → diagnostics
+│
+├─ bootstrapSliceG1PP  [short tenor]
+│   │
+│   ├─ select quote column
+│   ├─ buildCalibrationPointFromSurface
+│   ├─ residualBucketG1PP
+│   ├─ solve σ_k
+│   └─ return sigmaShapePack
+│
+└─ bootstrapSliceG1PP  [long tenor]
+    │
+    ├─ select quote column
+    ├─ buildCalibrationPointFromSurface
+    ├─ residualBucketG1PP
+    ├─ solve σ_k
+    └─ return etaShapePack
+```
+
+# 6. Decision needed before code
+
+The next code depends on one convention:
+
+$$
+\boxed{
+\text{Do we implement } \texttt{priceSwaptionG1PP} \text{ ourselves, or wrap existing HW1F pricing?}
+}
+$$
+
+My recommendation: wrap the existing HW1F formula **only if** it can accept explicit vol vector and time structure. Otherwise write a small G1PP pricing method with explicit inputs, because this block is only a shape generator and should not depend on HW1F object state too much.
+
+## Response:
+5/15/2026, 1:51:57 PM
+
+Yes. Clean answer:
+
+$$
+\boxed{
+\text{Do not wrap HW1F. Implement G1++ as a degenerate mode of your G2++ class.}
+}
+$$
+
+# 1. G1++ inside `GaussianTwoFactors`
+
+Your class already has:
+
+```matlab
+meanReversion_x
+meanReversion_y
+volatility_sigma
+volatility_eta
+correlation
+```
+
+So a one-factor Gaussian model can be represented as:
+
+$$
+r_t = x_t + \phi(t),
+\qquad
+dx_t = -a x_t dt + \sigma(t)dW_t.
+$$
+
+Inside `GaussianTwoFactors`, this is obtained by freezing the second factor:
+
+$$
+\eta(t)=0.
+$$
+
+or symmetrically:
+
+$$
+\sigma(t)=0.
+$$
+
+For the XG2++ initialization, use:
+
+```matlab
+G1PP-x mode:
+    meanReversion_x = a
+    volatility_sigma = sigmaShape
+    volatility_eta = 0
+```
+
+and for the second slice, either reuse the same `x` machinery or use:
+
+```matlab
+G1PP-y mode:
+    meanReversion_y = b
+    volatility_eta = etaShape
+    volatility_sigma = 0
+```
+
+But mathematically, for one-factor initialization, the cleanest is:
+
+$$
+\boxed{
+\text{use one generic G1++ pricing helper with } a,\sigma(t)
+}
+$$
+
+not the full two-factor pricer.
+
+---
+
+# 2. Why not set both G2++ factors equal?
+
+If you set:
+
+$$
+a=b,\qquad \sigma(t)=\eta(t),
+$$
+
+then G2++ is not automatically G1++.
+
+You get:
+
+$$
+r_t=x_t+y_t+\phi(t).
+$$
+
+If both OU factors have the same mean reversion, then their sum is still one Gaussian factor:
+
+$$
+z_t=x_t+y_t,
+$$
+
+but its effective volatility is:
+
+$$
+\sigma_z(t)^2
+=
+\sigma(t)^2+\eta(t)^2+2\rho\sigma(t)\eta(t).
+$$
+
+So the model collapses to G1++ only if you treat:
+
+$$
+z_t=x_t+y_t
+$$
+
+as the single factor with volatility:
+
+$$
+\boxed{
+\sigma_{\mathrm{eff}}(t)
+=
+\sqrt{\sigma(t)^2+\eta(t)^2+2\rho\sigma(t)\eta(t)}
+}
+$$
+
+That is not the same as “same mean reversion for both vectors.”
+
+---
+
+# 3. Consistency expectation
+
+If:
+
+$$
+a=b
+$$
+
+then G2++ has a **one-factor-equivalent short-rate variance**, but the decomposition between $x$ and $y$ is not identifiable.
+
+So calibration becomes structurally weak:
+
+$$
+(\sigma,\eta,\rho)
+\quad \mapsto \quad
+\sigma_{\mathrm{eff}}
+$$
+
+many parameter triples give the same one-factor variance.
+
+Therefore:
+
+$$
+\boxed{
+a=b \text{ is useful for testing reduction, not for final G2++ calibration.}
+}
+$$
+
+---
+
+# 4. Practical convention for us
+
+For XG2++ initialization:
+
+```text
+Global G1++ calibration
+    → estimate a_G1 and sigma_G1
+
+Short-tenor G1++ slice
+    → use a_G1
+    → bootstrap sigmaShape
+
+Long-tenor G1++ slice
+    → use a_G1 or b seed
+    → bootstrap etaShape
+```
+
+Then initialize G2++ as:
+
+$$
+a_0 = a_{G1},
+\qquad
+b_0 \neq a_0 \text{ or weakly separated},
+\qquad
+\rho_0 < 0.
+$$
+
+Example:
+
+```matlab
+a0 = g1Global.a;
+b0 = max(0.05, 0.25 * g1Global.a);
+rho0 = -0.50;
+```
+
+Not final truth. Just a stable starting geometry.
+
+# 5. Bottom line
+
+Use G1++ as its own one-factor formula inside `GaussianTwoFactors`.
+
+Do **not** simulate it by setting both G2++ factors equal.
+
+Use the degenerate G2++ logic only for tests:
+
+$$
+\eta=0 \Rightarrow G2++ \to G1++.
+$$
+
+That is the safe consistency check.
+
+## Response:
+5/15/2026, 1:54:28 PM
+
+> **Focusing on concise code structure and methods**
+>
+> I need to come up with code but keep it concise and relevant — no external web searches here. The user asked for a substantial code answer, but I should avoid unnecessary citations, even if files are involved. I’ll probably need to provide methods like `calibrateGlobalG1PP`, `residualGlobalG1PP`, and others, relying on earlier helpers. I'll keep it simple and use class methods where I can.
+>
+> Thought for 44s
+
+I’ll ship this as a first working internal block, not a final library abstraction. I’ll keep each method flat, explicit, and dependent on the setup helpers already agreed.
+
+Paste these inside `methods` of `GaussianTwoFactors`. This block assumes your setup helpers already exist:
+
+```matlab
+buildPricersG2PP
+buildVolSurfacePackXG2PP
+initCalibXG2PP
+getPricingDateNum
+parseTenorsXG2PP
+```
+
+It also assumes `getInitialMarketZC`, `getH`, `getExpDiff` already exist.
+
+```matlab
+function g1Global = calibrateGlobalG1PP(obj, surfacePack, pricers, args)
+    % G2++ Calibration Helper: Calibrates a constant-volatility G1++ model
+    % to the full swaption surface. This produces the one-factor starting
+    % point used before the two slice bootstraps.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+
+        args.initialA (1,1) double = NaN;
+        args.initialSigma (1,1) double = 0.01;
+
+        args.useLsqnonlin (1,1) logical = true;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    if isnan(args.initialA)
+        a0 = obj.meanReversion_x;
+    else
+        a0 = args.initialA;
+    end
+
+    theta0 = log([a0; args.initialSigma]);
+
+    calibSet = struct([]);
+    k = 0;
+
+    for i = 1:surfacePack.nbExpiries
+        for j = 1:surfacePack.nbTenors
+
+            if ~surfacePack.validMask(i,j)
+                continue
+            end
+
+            k = k + 1;
+
+            calibSet(k) = obj.buildCalibrationPointFromSurface( ...
+                surfacePack, pricers, i, j, ...
+                'irs', args.irs, ...
+                'notional', args.notional, ...
+                'settleType', args.settleType);
+        end
+    end
+
+    residualFun = @(theta) obj.residualGlobalG1PP( ...
+        theta, calibSet, surfacePack, ...
+        'objectiveType', args.objectiveType);
+
+    if args.useLsqnonlin && exist('lsqnonlin', 'file') == 2
+        options = optimoptions('lsqnonlin', ...
+            'Display', 'none', ...
+            'MaxIterations', 300, ...
+            'FunctionTolerance', 1e-8, ...
+            'StepTolerance', 1e-8);
+
+        [thetaStar, resnorm, residuals, exitflag, output] = ...
+            lsqnonlin(residualFun, theta0, [], [], options);
+    else
+        options = optimset('Display', 'off', 'MaxIter', 300);
+        objFun = @(theta) sum(residualFun(theta).^2);
+
+        [thetaStar, resnorm, exitflag, output] = ...
+            fminsearch(objFun, theta0, options);
+
+        residuals = residualFun(thetaStar);
+    end
+
+    params = exp(thetaStar);
+
+    g1Global = struct();
+    g1Global.a = params(1);
+    g1Global.sigma = params(2);
+    g1Global.thetaStar = thetaStar;
+    g1Global.calibSet = calibSet;
+    g1Global.residuals = residuals;
+    g1Global.resnorm = resnorm;
+    g1Global.exitflag = exitflag;
+    g1Global.output = output;
+    g1Global.rmse = sqrt(mean(residuals.^2));
+    g1Global.maxAbsResidual = max(abs(residuals));
+end
+```
+
+```matlab
+function residuals = residualGlobalG1PP(obj, thetaRaw, calibSet, surfacePack, args)
+    % G2++ Calibration Helper: Full-surface residual for constant G1++.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        calibSet (1,:) struct;
+        surfacePack (1,1) struct;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    params = exp(thetaRaw(:));
+    a = params(1);
+    sigma = params(2);
+
+    maxMat = max(surfacePack.matSwapDatesYr(:));
+    volTimeStructure = maxMat + 1.0;
+    volVector = sigma .* ones(2,1);
+
+    residuals = NaN(numel(calibSet), 1);
+
+    for k = 1:numel(calibSet)
+
+        point = calibSet(k);
+
+        modelPrice = obj.priceSwaptionG1PP( ...
+            point.strike, ...
+            point.expiry, ...
+            point.paymentDates, ...
+            a, ...
+            volVector, ...
+            volTimeStructure, ...
+            'direction', point.direction, ...
+            'notional', point.notional);
+
+        switch args.objectiveType
+            case 'price'
+                scale = 1.0;
+            otherwise
+                scale = max(point.notional * point.annuity, 1e-12);
+        end
+
+        residuals(k) = sqrt(point.weight) * ...
+            (modelPrice - point.marketPrice) / scale;
+    end
+end
+```
+
+```matlab
+function shapePack = bootstrapSliceG1PP(obj, surfacePack, pricers, g1Global, args)
+    % G2++ Calibration Helper: Bootstraps one G1++ piecewise volatility
+    % slice. Use once for the short-tenor sigma shape and once for the
+    % long-tenor eta shape.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+        g1Global (1,1) struct;
+
+        args.tenorIdx (1,1) double;
+        args.shapeName (1,:) char = 'sigma';
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+
+        args.initialVol (1,1) double = NaN;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    tenorIdx = args.tenorIdx;
+
+    quoteRows = find(surfacePack.validMask(:, tenorIdx));
+    nbSteps = numel(quoteRows);
+
+    if isnan(args.initialVol)
+        initialVol = g1Global.sigma;
+    else
+        initialVol = args.initialVol;
+    end
+
+    shape = NaN(nbSteps, 1);
+    modelPrices = NaN(nbSteps, 1);
+    marketPrices = NaN(nbSteps, 1);
+    residuals = NaN(nbSteps, 1);
+    strikes = NaN(nbSteps, 1);
+    directions = strings(nbSteps, 1);
+
+    timeStructure = surfacePack.expiryDatesYr(quoteRows);
+    timeStructure = timeStructure(:);
+
+    for k = 1:nbSteps
+
+        row = quoteRows(k);
+
+        point = obj.buildCalibrationPointFromSurface( ...
+            surfacePack, pricers, row, tenorIdx, ...
+            'irs', args.irs, ...
+            'notional', args.notional, ...
+            'settleType', args.settleType);
+
+        if k == 1
+            guess = initialVol;
+        else
+            guess = shape(k-1);
+        end
+
+        resFun = @(v) obj.residualBucketG1PP( ...
+            v, k, shape, timeStructure, point, g1Global.a, ...
+            'objectiveType', args.objectiveType);
+
+        try
+            volK = fzero(resFun, [1e-5, 1.0]);
+        catch
+            volK = fminsearch(@(v) resFun(abs(v)).^2, guess, ...
+                optimset('Display', 'off', 'MaxIter', 100));
+            volK = abs(volK);
+        end
+
+        shape(k) = volK;
+
+        volVector = [shape(1:k); shape(k)];
+        volTimeStructure = timeStructure(1:k);
+
+        modelPrice = obj.priceSwaptionG1PP( ...
+            point.strike, ...
+            point.expiry, ...
+            point.paymentDates, ...
+            g1Global.a, ...
+            volVector, ...
+            volTimeStructure, ...
+            'direction', point.direction, ...
+            'notional', point.notional);
+
+        modelPrices(k) = modelPrice;
+        marketPrices(k) = point.marketPrice;
+        residuals(k) = modelPrice - point.marketPrice;
+        strikes(k) = point.strike;
+        directions(k) = string(point.direction);
+    end
+
+    shapePack = struct();
+    shapePack.name = args.shapeName;
+    shapePack.tenorIdx = tenorIdx;
+    shapePack.tenor = surfacePack.tenorsYr(tenorIdx);
+
+    shapePack.timeStructure = timeStructure;
+    shapePack.timeStructureDt = timeStructure;
+    shapePack.shape = shape;
+
+    shapePack.modelPrices = modelPrices;
+    shapePack.marketPrices = marketPrices;
+    shapePack.residuals = residuals;
+    shapePack.strikes = strikes;
+    shapePack.directions = directions;
+
+    shapePack.g1MeanReversion = g1Global.a;
+    shapePack.quoteRows = quoteRows;
+end
+```
+
+```matlab
+function residual = residualBucketG1PP(obj, volCandidate, step, shape, timeStructure, point, a, args)
+    % G2++ Calibration Helper: Scalar residual for one G1++ bootstrap bucket.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        volCandidate (1,1) double;
+        step (1,1) double;
+        shape (:,1) double;
+        timeStructure (:,1) double;
+        point (1,1) struct;
+        a (1,1) double;
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    volCandidate = abs(volCandidate);
+
+    volSlice = shape(1:step);
+    volSlice(step) = volCandidate;
+
+    volVector = [volSlice; volCandidate];
+    volTimeStructure = timeStructure(1:step);
+
+    modelPrice = obj.priceSwaptionG1PP( ...
+        point.strike, ...
+        point.expiry, ...
+        point.paymentDates, ...
+        a, ...
+        volVector, ...
+        volTimeStructure, ...
+        'direction', point.direction, ...
+        'notional', point.notional);
+
+    switch args.objectiveType
+        case 'price'
+            scale = 1.0;
+        otherwise
+            scale = max(point.notional * point.annuity, 1e-12);
+    end
+
+    residual = (modelPrice - point.marketPrice) / scale;
+end
+```
+
+```matlab
+function point = buildCalibrationPointFromSurface(obj, surfacePack, pricers, row, col, args)
+    % G2++ Calibration Helper: Builds one market calibration point from the
+    % normalized volatility surface.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+        row (1,1) double;
+        col (1,1) double;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+    end
+
+    swapStartDate = surfacePack.startSwapDates(row, col);
+    matSwapDate = surfacePack.matSwapDates(row, col);
+    exerciseDate = surfacePack.expiryDates(row);
+    marketVol = surfacePack.volMatrix(row, col);
+
+    irs = copy(args.irs(1));
+    irs.setNotional(args.notional);
+    irs.setDates(swapStartDate, matSwapDate);
+
+    [npv, ~, ~] = pricers.swap.IRSVanille(irs, ...
+        'measures', true, ...
+        'details', true);
+
+    if isempty(surfacePack.strikes)
+        strike = npv.FairSwapRate;
+    else
+        strike = surfacePack.strikes(row, col);
+    end
+
+    direction = obj.swaptionDirection(strike, npv.FairSwapRate);
+    irs.direction = direction;
+
+    swaption = Swaption(irs, ...
+        'exerciseDate', exerciseDate, ...
+        'strike', strike, ...
+        'settleType', args.settleType);
+
+    [~, fixedLegPDates, ~] = irs.fixedLeg01(swapStartDate);
+
+    fixedLegPDates = fixedLegPDates(:).';
+
+    paymentDates = yearfracExtend( ...
+        surfacePack.pricingDateNum, ...
+        fixedLegPDates(2:end), ...
+        obj.basis);
+
+    paymentDates = paymentDates(:).';
+
+    tenorsDt = yearfracExtend( ...
+        fixedLegPDates(1:end-1), ...
+        fixedLegPDates(2:end), ...
+        swaption.irs.fixedLeg.interestDCC);
+
+    tenorsDt = tenorsDt(:).';
+
+    [marketPrice, ~, annuity, bachelierVol] = pricers.bachelier.Swaption( ...
+        swaption, ...
+        'measures', false, ...
+        'vol', marketVol, ...
+        'irsRes', npv);
+
+    point = struct();
+    point.row = row;
+    point.col = col;
+
+    point.irs = irs;
+    point.swaption = swaption;
+    point.npv = npv;
+
+    point.expiryDate = exerciseDate;
+    point.expiry = surfacePack.expiryDatesYr(row);
+    point.swapStartDate = swapStartDate;
+    point.matSwapDate = matSwapDate;
+
+    point.paymentDates = paymentDates;
+    point.tenorsDt = tenorsDt;
+    point.fixedLegPDates = fixedLegPDates;
+
+    point.strike = strike;
+    point.direction = direction;
+    point.notional = args.notional;
+
+    point.marketVol = marketVol;
+    point.bachelierVol = bachelierVol;
+    point.marketPrice = marketPrice;
+    point.annuity = annuity;
+
+    point.weight = surfacePack.weights(row, col);
+end
+```
+
+Now the G1++ pricing kernel.
+
+```matlab
+function price = priceSwaptionG1PP(obj, strike, expiry, paymentDates, a, volVector, volTimeStructure, args)
+    % G2++ Calibration Helper: Prices a European swaption under one-factor
+    % Gaussian G1++ using the same bond-basket convention as the G2++ pricer.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        strike (1,1) double;
+        expiry (1,1) double;
+        paymentDates (1,:) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+
+        args.direction (1,:) char {mustBeMember(args.direction, {'PAY','REC'})} = 'PAY';
+        args.notional (1,1) double = 1e6;
+    end
+
+    paymentDates = paymentDates(:);
+
+    basket = obj.getBondBasketG1PP(expiry, paymentDates, a, volVector, volTimeStructure);
+
+    delta = diff([expiry; paymentDates]);
+
+    coeffs = strike .* delta;
+    coeffs(end) = coeffs(end) + 1.0;
+
+    lambda = coeffs .* basket.A0Ti(:);
+    B = basket.B0Ti(:);
+
+    xBar = obj.solveXBarG1PP(lambda, B);
+
+    gaussian = obj.getStateGaussianG1PP(expiry, a, volVector, volTimeStructure);
+
+    muX = gaussian.muX;
+    varX = gaussian.varX;
+    sigX = sqrt(max(varX, 0));
+
+    if sigX <= 0
+        basketValue = sum(lambda .* exp(-B .* muX));
+
+        if strcmpi(args.direction, 'PAY')
+            payoff = max(1 - basketValue, 0);
+        else
+            payoff = max(basketValue - 1, 0);
+        end
+
+        price = args.notional .* basket.P0T0 .* payoff;
+        return
+    end
+
+    h0 = (xBar - muX) ./ sigX;
+    h1 = h0 + B .* sigX;
+    kappa = -B .* muX + 0.5 .* (B.^2) .* varX;
+
+    if strcmpi(args.direction, 'PAY')
+        expectation = normcdf(-h0) - sum(lambda .* exp(kappa) .* normcdf(-h1));
+    else
+        expectation = sum(lambda .* exp(kappa) .* normcdf(h1)) - normcdf(h0);
+    end
+
+    price = args.notional .* basket.P0T0 .* max(expectation, 0);
+end
+```
+
+```matlab
+function basket = getBondBasketG1PP(obj, expiry, paymentDates, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Builds the G1++ affine bond basket.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        expiry (1,1) double;
+        paymentDates (:,1) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    paymentDates = paymentDates(:);
+
+    zc = obj.getInitialMarketZC([expiry, paymentDates.']);
+    zc = zc(:);
+
+    P0T0 = zc(1);
+    P0Ti = zc(2:end);
+
+    dt = paymentDates - expiry;
+    B0Ti = obj.getH(a, dt);
+
+    var0T0 = obj.varianceIntegralG1PP(0, expiry, a, volVector, volTimeStructure);
+
+    varT0Ti = zeros(numel(paymentDates), 1);
+    var0Ti = zeros(numel(paymentDates), 1);
+
+    for i = 1:numel(paymentDates)
+        Ti = paymentDates(i);
+
+        varT0Ti(i) = obj.varianceIntegralG1PP( ...
+            expiry, Ti, a, volVector, volTimeStructure);
+
+        var0Ti(i) = obj.varianceIntegralG1PP( ...
+            0, Ti, a, volVector, volTimeStructure);
+    end
+
+    A0Ti = (P0Ti ./ P0T0) .* exp(0.5 .* (varT0Ti - var0Ti + var0T0));
+
+    basket = struct();
+    basket.P0T0 = P0T0;
+    basket.P0Ti = P0Ti;
+    basket.A0Ti = A0Ti;
+    basket.B0Ti = B0Ti(:);
+end
+```
+
+```matlab
+function gaussian = getStateGaussianG1PP(obj, expiry, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Computes X_T law under the T-forward measure
+    % for one-factor Gaussian initialization.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        expiry (1,1) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    muX = obj.meanForwardG1PP(0, expiry, a, volVector, volTimeStructure);
+    varX = obj.varianceStateG1PP(0, expiry, a, volVector, volTimeStructure);
+
+    gaussian = struct();
+    gaussian.muX = muX;
+    gaussian.varX = varX;
+end
+```
+
+```matlab
+function xBar = solveXBarG1PP(obj, lambda, B)
+    % G2++ Calibration Helper: Solves the one-factor Jamshidian boundary.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        lambda (:,1) double;
+        B (:,1) double;
+    end
+
+    f = @(x) 1 - sum(lambda .* exp(-B .* x));
+
+    lo = -0.10;
+    hi =  0.10;
+
+    flo = f(lo);
+    fhi = f(hi);
+
+    k = 0;
+
+    while flo * fhi > 0 && k < 40
+        width = hi - lo;
+        lo = lo - 2 * width;
+        hi = hi + 2 * width;
+
+        flo = f(lo);
+        fhi = f(hi);
+
+        k = k + 1;
+    end
+
+    if flo * fhi > 0
+        xBar = NaN;
+        return
+    end
+
+    xBar = fzero(f, [lo, hi]);
+end
+```
+
+```matlab
+function output = varianceStateG1PP(obj, startDate, endDate, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Variance of X(endDate) conditional on startDate.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate (1,1) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    [bucketLeft, bucketRight] = obj.getBucketBoundsG1PP(volTimeStructure);
+
+    idx = find((bucketRight > startDate) & (bucketLeft < endDate));
+
+    localLeft = max(startDate, bucketLeft(idx));
+    localRight = min(endDate, bucketRight(idx));
+
+    deltaLeft = endDate - localLeft(:);
+    deltaRight = endDate - localRight(:);
+
+    vol = volVector(idx);
+    vol = vol(:);
+
+    exp2A = obj.getExpDiff(2*a, deltaLeft, deltaRight);
+
+    output = sum((vol.^2 ./ (2*a)) .* exp2A);
+end
+```
+
+```matlab
+function output = meanForwardG1PP(obj, startDate, endDate, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Mean of X(endDate) under the endDate-forward
+    % measure in the one-factor Gaussian model.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate (1,1) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    [bucketLeft, bucketRight] = obj.getBucketBoundsG1PP(volTimeStructure);
+
+    idx = find((bucketRight > startDate) & (bucketLeft < endDate));
+
+    localLeft = max(startDate, bucketLeft(idx));
+    localRight = min(endDate, bucketRight(idx));
+
+    deltaLeft = endDate - localLeft(:);
+    deltaRight = endDate - localRight(:);
+
+    vol = volVector(idx);
+    vol = vol(:);
+
+    expA = obj.getExpDiff(a, deltaLeft, deltaRight);
+    exp2A = obj.getExpDiff(2*a, deltaLeft, deltaRight);
+
+    output = sum(-(vol.^2 ./ a.^2) .* expA ...
+                 + (vol.^2 ./ (2*a.^2)) .* exp2A);
+end
+```
+
+```matlab
+function output = varianceIntegralG1PP(obj, startDate, endDate, a, volVector, volTimeStructure)
+    % G2++ Calibration Helper: Variance of integral_startDate^endDate X(u)du
+    % under piecewise-constant one-factor volatility.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        startDate (1,1) double;
+        endDate (1,1) double;
+        a (1,1) double;
+        volVector (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    [bucketLeft, bucketRight] = obj.getBucketBoundsG1PP(volTimeStructure);
+
+    idx = find((bucketRight > startDate) & (bucketLeft < endDate));
+
+    localLeft = max(startDate, bucketLeft(idx));
+    localRight = min(endDate, bucketRight(idx));
+
+    deltaLeft = endDate - localLeft(:);
+    deltaRight = endDate - localRight(:);
+
+    vol = volVector(idx);
+    vol = vol(:);
+
+    deltaInterval = deltaLeft - deltaRight;
+
+    expA = obj.getExpDiff(a, deltaLeft, deltaRight);
+    exp2A = obj.getExpDiff(2*a, deltaLeft, deltaRight);
+
+    output = sum((vol.^2 ./ a.^2) .* ...
+        (deltaInterval - (2./a).*expA + (1./(2*a)).*exp2A));
+end
+```
+
+```matlab
+function [bucketLeft, bucketRight] = getBucketBoundsG1PP(obj, volTimeStructure)
+    % G2++ Calibration Helper: Bucket bounds for explicit G1++ volatility
+    % vectors.
+    %#ok<INUSD>
+
+    timeSteps = volTimeStructure(:).';
+
+    bucketLeft = [0, timeSteps];
+    bucketRight = [timeSteps, Inf];
+
+    bucketLeft = bucketLeft(:);
+    bucketRight = bucketRight(:);
+end
+```
+
+Typical use:
+
+```matlab
+g1Global = obj.calibrateGlobalG1PP(surfacePack, pricers);
+
+sigmaShapePack = obj.bootstrapSliceG1PP( ...
+    surfacePack, pricers, g1Global, ...
+    'tenorIdx', xg2ppState.shortTenorIdx, ...
+    'shapeName', 'sigma');
+
+etaShapePack = obj.bootstrapSliceG1PP( ...
+    surfacePack, pricers, g1Global, ...
+    'tenorIdx', xg2ppState.longTenorIdx, ...
+    'shapeName', 'eta');
+```
+
+
 
 ---
 Powered by [ChatGPT Exporter](https://www.chatgptexporter.com)
