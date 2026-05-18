@@ -5006,20 +5006,1788 @@ priceSwaptionG1PP
 priceSwaptionG1PP
 ```
 
-SHAPE ASSEMBLY
-│
-├─ buildShapeStateG2PP
-├─ alignShapeBucketsG2PP
-└─ initializeScaledG2PPState
+# Calibration Pipeline Review
 
-SCALED G2++ CALIBRATION
+inside `methods` of `GaussianTwoFactors`.
+
+```matlab
+function shapeState = buildShapeStateG2PP(obj, sigmaShapePack, etaShapePack, xg2ppState)
+    % G2++ Calibration Helper: Builds the two-factor shape state from the
+    % two G1++ slice bootstraps.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        sigmaShapePack (1,1) struct;
+        etaShapePack (1,1) struct;
+        xg2ppState (1,1) struct;
+    end
+
+    [calibTimeStructure, sigmaShape, etaShape] = obj.alignShapeBucketsG2PP( ...
+        sigmaShapePack, etaShapePack);
+
+    scaledState = obj.initializeScaledG2PPState( ...
+        xg2ppState, sigmaShape, etaShape);
+
+    sigmaModel0 = obj.expandVolBucketsXG2PP( ...
+        scaledState.initial.alphaSigma .* sigmaShape, ...
+        xg2ppState.terminalPolicy);
+
+    etaModel0 = obj.expandVolBucketsXG2PP( ...
+        scaledState.initial.alphaEta .* etaShape, ...
+        xg2ppState.terminalPolicy);
+
+    shapeState = struct();
+
+    shapeState.calibTimeStructure = calibTimeStructure(:);
+    shapeState.sigmaShape = sigmaShape(:);
+    shapeState.etaShape = etaShape(:);
+
+    shapeState.sigmaModel0 = sigmaModel0(:);
+    shapeState.etaModel0 = etaModel0(:);
+
+    shapeState.thetaNames = scaledState.thetaNames;
+    shapeState.theta0 = scaledState.theta0;
+    shapeState.bounds = scaledState.bounds;
+    shapeState.initial = scaledState.initial;
+
+    shapeState.terminalPolicy = xg2ppState.terminalPolicy;
+
+    shapeState.sigmaSource = sigmaShapePack.name;
+    shapeState.etaSource = etaShapePack.name;
+
+    shapeState.sigmaTenorIdx = sigmaShapePack.tenorIdx;
+    shapeState.etaTenorIdx = etaShapePack.tenorIdx;
+end
+```
+
+```matlab
+function [commonTimeStructure, sigmaShapeAligned, etaShapeAligned] = alignShapeBucketsG2PP(obj, sigmaShapePack, etaShapePack)
+    % G2++ Calibration Helper: Aligns two piecewise-constant G1++ shapes on
+    % a common bucket grid.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        sigmaShapePack (1,1) struct;
+        etaShapePack (1,1) struct;
+    end
+
+    %#ok<INUSD>
+
+    sigmaTime = sigmaShapePack.timeStructure(:);
+    etaTime = etaShapePack.timeStructure(:);
+
+    sigmaShape = sigmaShapePack.shape(:);
+    etaShape = etaShapePack.shape(:);
+
+    commonTimeStructure = unique([sigmaTime; etaTime]);
+    commonTimeStructure = sort(commonTimeStructure(:));
+
+    sigmaShapeAligned = NaN(numel(commonTimeStructure), 1);
+    etaShapeAligned = NaN(numel(commonTimeStructure), 1);
+
+    for k = 1:numel(commonTimeStructure)
+        t = commonTimeStructure(k);
+
+        idxSigma = find(sigmaTime >= t, 1, 'first');
+        if isempty(idxSigma)
+            idxSigma = numel(sigmaShape);
+        end
+
+        idxEta = find(etaTime >= t, 1, 'first');
+        if isempty(idxEta)
+            idxEta = numel(etaShape);
+        end
+
+        sigmaShapeAligned(k) = sigmaShape(idxSigma);
+        etaShapeAligned(k) = etaShape(idxEta);
+    end
+end
+```
+
+```matlab
+function scaledState = initializeScaledG2PPState(obj, xg2ppState, sigmaShape, etaShape)
+    % G2++ Calibration Helper: Builds the reduced G2++ starting vector and
+    % bounds for scaled-shape calibration.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        xg2ppState (1,1) struct;
+        sigmaShape (:,1) double;
+        etaShape (:,1) double;
+    end
+
+    %#ok<INUSD>
+
+    thetaNames = ["a"; "b"; "rho"; "alphaSigma"; "alphaEta"];
+
+    theta0 = [
+        xg2ppState.initial.a
+        xg2ppState.initial.b
+        xg2ppState.initial.rho
+        xg2ppState.initial.alphaSigma
+        xg2ppState.initial.alphaEta
+    ];
+
+    scaledState = struct();
+
+    scaledState.thetaNames = thetaNames;
+    scaledState.theta0 = theta0(:);
+    scaledState.bounds = xg2ppState.bounds;
+
+    scaledState.initial = xg2ppState.initial;
+    scaledState.nbBuckets = numel(sigmaShape);
+    scaledState.sigmaShape = sigmaShape(:);
+    scaledState.etaShape = etaShape(:);
+end
+```
+
+```matlab
+function calibSet = buildFullSurfaceCalibrationSetG2PP(obj, surfacePack, pricers, args)
+    % G2++ Calibration Helper: Builds the full-surface calibration set used
+    % by the scaled G2++ residual.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+    end
+
+    calibSet = [];
+    k = 0;
+
+    for i = 1:surfacePack.nbExpiries
+        for j = 1:surfacePack.nbTenors
+
+            if ~surfacePack.validMask(i,j)
+                continue
+            end
+
+            point = obj.buildCalibrationPointFromSurface( ...
+                surfacePack, pricers, i, j, ...
+                'irs', args.irs, ...
+                'notional', args.notional, ...
+                'settleType', args.settleType);
+
+            k = k + 1;
+
+            if k == 1
+                calibSet = point;
+            else
+                calibSet(k) = point;
+            end
+        end
+    end
+
+    if isempty(calibSet)
+        error("No valid G2++ calibration point was built.");
+    end
+end
+```
+
+```matlab
+function scaledResult = solveScaledG2PP(obj, shapeState, calibSet, args)
+    % G2++ Calibration Helper: Solves the reduced scaled-shape G2++
+    % calibration problem.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        shapeState (1,1) struct;
+        calibSet (1,:) struct;
+
+        args.objectiveType (1,:) char = 'normalizedPrice';
+        args.useLsqnonlin (1,1) logical = true;
+        args.maxIterations (1,1) double = 300;
+    end
+
+    theta0 = shapeState.theta0(:);
+    lb = shapeState.bounds.lower(:);
+    ub = shapeState.bounds.upper(:);
+
+    residualFun = @(theta) obj.residualScaledG2PP( ...
+        theta, shapeState, calibSet, ...
+        'objectiveType', args.objectiveType);
+
+    if args.useLsqnonlin && exist('lsqnonlin', 'file') == 2
+
+        options = optimoptions('lsqnonlin', ...
+            'Display', 'none', ...
+            'MaxIterations', args.maxIterations, ...
+            'FunctionTolerance', 1e-8, ...
+            'StepTolerance', 1e-8);
+
+        [thetaStar, resnorm, residuals, exitflag, output] = ...
+            lsqnonlin(residualFun, theta0, lb, ub, options);
+
+    else
+
+        options = optimset('Display', 'off', 'MaxIter', args.maxIterations);
+
+        objFun = @(theta) sum(residualFun(theta).^2);
+
+        [thetaStar, resnorm, exitflag, output] = ...
+            fminsearch(objFun, theta0, options);
+
+        residuals = residualFun(thetaStar);
+    end
+
+    params = obj.getScaledG2PPParams(thetaStar, shapeState);
+
+    scaledResult = struct();
+    scaledResult.thetaStar = thetaStar(:);
+    scaledResult.thetaNames = shapeState.thetaNames;
+
+    scaledResult.params = params;
+    scaledResult.shapeState = shapeState;
+
+    scaledResult.resnorm = resnorm;
+    scaledResult.residuals = residuals;
+    scaledResult.exitflag = exitflag;
+    scaledResult.output = output;
+
+    scaledResult.rmse = sqrt(mean(residuals.^2));
+    scaledResult.maxAbsResidual = max(abs(residuals));
+
+    scaledResult.calibSet = calibSet;
+end
+```
+
+```matlab
+function residuals = residualScaledG2PP(obj, thetaRaw, shapeState, calibSet, args)
+    % G2++ Calibration Helper: Full-surface residual for scaled-shape G2++.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        shapeState (1,1) struct;
+        calibSet (1,:) struct;
+
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    theta = thetaRaw(:);
+    lb = shapeState.bounds.lower(:);
+    ub = shapeState.bounds.upper(:);
+
+    if any(theta < lb) || any(theta > ub)
+        residuals = 1e6 .* ones(numel(calibSet), 1);
+        return
+    end
+
+    params = obj.getScaledG2PPParams(theta, shapeState);
+
+    oldState = obj.setTemporaryScaledG2PPState( ...
+        params.a, ...
+        params.b, ...
+        params.rho, ...
+        params.sigmaModel, ...
+        params.etaModel, ...
+        shapeState.calibTimeStructure);
+
+    residuals = NaN(numel(calibSet), 1);
+
+    try
+        for k = 1:numel(calibSet)
+
+            point = calibSet(k);
+
+            try
+                modelPrice = obj.getSwaptionPriceG2PP( ...
+                    point.strike, ...
+                    point.expiry, ...
+                    point.paymentDates, ...
+                    'direction', point.direction, ...
+                    'notional', point.notional);
+            catch
+                modelPrice = NaN;
+            end
+
+            switch args.objectiveType
+                case 'price'
+                    scale = 1.0;
+
+                case 'normalizedPrice'
+                    scale = max(abs(point.annuity), 1.0);
+
+                case 'marketNormalizedPrice'
+                    scale = max(abs(point.marketPrice), 1.0);
+
+                otherwise
+                    error("Unsupported objectiveType.");
+            end
+
+            residuals(k) = sqrt(point.weight) .* ...
+                (modelPrice - point.marketPrice) ./ scale;
+
+            if ~isfinite(residuals(k))
+                residuals(k) = 1e6;
+            end
+        end
+
+        obj.restoreScaledG2PPState(oldState);
+
+    catch ME
+        obj.restoreScaledG2PPState(oldState);
+        rethrow(ME);
+    end
+end
+```
+
+```matlab
+function params = getScaledG2PPParams(obj, thetaRaw, shapeState)
+    % G2++ Calibration Helper: Converts reduced scaled vector into full G2++
+    % model parameters and volatility buckets.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        shapeState (1,1) struct;
+    end
+
+    %#ok<INUSD>
+
+    theta = thetaRaw(:);
+
+    a = theta(1);
+    b = theta(2);
+    rho = theta(3);
+    alphaSigma = theta(4);
+    alphaEta = theta(5);
+
+    sigmaCalib = alphaSigma .* shapeState.sigmaShape(:);
+    etaCalib = alphaEta .* shapeState.etaShape(:);
+
+    sigmaModel = obj.expandVolBucketsXG2PP( ...
+        sigmaCalib, ...
+        shapeState.terminalPolicy);
+
+    etaModel = obj.expandVolBucketsXG2PP( ...
+        etaCalib, ...
+        shapeState.terminalPolicy);
+
+    params = struct();
+
+    params.a = a;
+    params.b = b;
+    params.rho = rho;
+
+    params.alphaSigma = alphaSigma;
+    params.alphaEta = alphaEta;
+
+    params.sigmaCalib = sigmaCalib;
+    params.etaCalib = etaCalib;
+
+    params.sigmaModel = sigmaModel(:);
+    params.etaModel = etaModel(:);
+end
+```
+
+```matlab
+function oldState = setTemporaryScaledG2PPState(obj, a, b, rho, sigmaModel, etaModel, volTimeStructure)
+    % G2++ Calibration Helper: Saves current state and sets temporary scaled
+    % G2++ model parameters.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        a (1,1) double;
+        b (1,1) double;
+        rho (1,1) double;
+        sigmaModel (:,1) double;
+        etaModel (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    if numel(sigmaModel) ~= numel(volTimeStructure) + 1
+        error("sigmaModel length must equal numel(volTimeStructure)+1.");
+    end
+
+    if numel(etaModel) ~= numel(volTimeStructure) + 1
+        error("etaModel length must equal numel(volTimeStructure)+1.");
+    end
+
+    oldState = struct();
+
+    oldState.meanReversion_x = obj.meanReversion_x;
+    oldState.meanReversion_y = obj.meanReversion_y;
+    oldState.volatility_sigma = obj.volatility_sigma;
+    oldState.volatility_eta = obj.volatility_eta;
+    oldState.volatilityTimeStructure = obj.volatilityTimeStructure;
+    oldState.volatilityTimeStructureDt = obj.volatilityTimeStructureDt;
+    oldState.correlation = obj.correlation;
+
+    obj.meanReversion_x = a;
+    obj.meanReversion_y = b;
+    obj.correlation = rho;
+
+    obj.volatility_sigma = sigmaModel(:).';
+    obj.volatility_eta = etaModel(:).';
+
+    obj.volatilityTimeStructure = volTimeStructure(:).';
+    obj.volatilityTimeStructureDt = [];
+end
+```
+
+```matlab
+function restoreScaledG2PPState(obj, oldState)
+    % G2++ Calibration Helper: Restores state after temporary scaled G2++ pricing.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        oldState (1,1) struct;
+    end
+
+    obj.meanReversion_x = oldState.meanReversion_x;
+    obj.meanReversion_y = oldState.meanReversion_y;
+    obj.volatility_sigma = oldState.volatility_sigma;
+    obj.volatility_eta = oldState.volatility_eta;
+    obj.volatilityTimeStructure = oldState.volatilityTimeStructure;
+    obj.volatilityTimeStructureDt = oldState.volatilityTimeStructureDt;
+    obj.correlation = oldState.correlation;
+end
+```
+
+```matlab
+function commitScaledG2PP(obj, scaledResult)
+    % G2++ Calibration Helper: Commits the calibrated scaled G2++ parameters
+    % into the model object.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        scaledResult (1,1) struct;
+    end
+
+    params = scaledResult.params;
+    shapeState = scaledResult.shapeState;
+
+    obj.meanReversion_x = params.a;
+    obj.meanReversion_y = params.b;
+    obj.correlation = params.rho;
+
+    obj.volatility_sigma = params.sigmaModel(:).';
+    obj.volatility_eta = params.etaModel(:).';
+
+    obj.volatilityTimeStructure = shapeState.calibTimeStructure(:).';
+    obj.volatilityTimeStructureDt = [];
+end
+```
+
+Minimal call sequence:
+
+```matlab
+shapeState = G2PP.buildShapeStateG2PP( ...
+    sigmaShapePack, ...
+    etaShapePack, ...
+    xg2ppState);
+
+calibSetG2 = G2PP.buildFullSurfaceCalibrationSetG2PP( ...
+    surfacePack, ...
+    pricers);
+
+scaledResult = G2PP.solveScaledG2PP( ...
+    shapeState, ...
+    calibSetG2, ...
+    'objectiveType', 'normalizedPrice');
+
+G2PP.commitScaledG2PP(scaledResult);
+```
+
+## Response:
+5/18/2026, 4:27:29 PM
+
+> **Clarifying statistical calibration testing methods**
+>
+> The user is asking for benchmarked methods to test calibration statistics. No web search needed, as general methods should suffice. I’ll focus on key techniques like residual vectors, weighted RMSE, MAE, max absolute error, implied volatility errors, cross-validation, parameter stability, sensitivity testing, and graphical methods such as heatmaps and slice plots. Keeping it concise and structured is important here.
+>
+> Thought for 15s
+
+Yes. For the MLX test section, split diagnostics into **calibration mechanics**, **statistical fit**, **parameter stability**, and **graphical residual analysis**.
+
+The key idea:
+
+$$
+\boxed{
+\text{A calibration is not validated because the optimizer converges.}
+}
+$$
+
+It is validated because residuals are small, structured errors are absent, parameters are stable, and the model behaves correctly on the surface.
+
+---
+
+# 1. Numerical diagnostics to benchmark
+
+## A. Price residuals
+
+For each swaption quote $i$:
+
+$$
+e_i^{price}=P_i^{model}-P_i^{mkt}.
+$$
+
+Useful summaries:
+
+```text
+RMSE price
+MAE price
+Max absolute price error
+Mean signed price error
+```
+
+But raw prices are scale-dependent, so they are not enough.
+
+---
+
+## B. Annuity-normalized price residuals
+
+This is probably our first main metric:
+
+$$
+e_i^{ann}
+=
+\frac{P_i^{model}-P_i^{mkt}}{A_i}.
+$$
+
+In the library, `annuity` may already be notional-adjusted, so the denominator should be:
+
+```matlab
+max(abs(point.annuity), 1.0)
+```
+
+not `notional * annuity`.
+
+This gives something closer to a normal-volatility pricing error.
+
+---
+
+## C. Market-price-normalized residuals
+
+Useful as a relative pricing diagnostic:
+
+$$
+e_i^{rel}
+=
+\frac{P_i^{model}-P_i^{mkt}}
+{\max(|P_i^{mkt}|,1)}.
+$$
+
+This is robust for dashboards, but it can overweight very cheap swaptions.
+
+---
+
+## D. Implied-volatility residuals
+
+This is the most interpretable calibration statistic:
+
+$$
+e_i^{vol}
+=
+\sigma_i^{model,imp}
+-
+\sigma_i^{mkt}.
+$$
+
+Report in basis points:
+
+$$
+e_i^{bp}=10^4 e_i^{vol}.
+$$
+
+Useful summaries:
+
+```text
+RMSE vol bp
+MAE vol bp
+Max abs vol bp
+Mean signed vol bp
+```
+
+For model governance, this is usually the clearest number.
+
+---
+
+## E. Bid-ask normalized residuals, if available
+
+If the cube has bid/ask or quote uncertainty:
+
+$$
+e_i^{BA}
+=
+\frac{\sigma_i^{model}-\sigma_i^{mid}}
+{\frac12(\sigma_i^{ask}-\sigma_i^{bid})}.
+$$
+
+Then a good target is:
+
+```text
+most residuals inside [-1, 1]
+few residuals outside [-2, 2]
+```
+
+If bid-ask is unavailable, do not fake this metric.
+
+---
+
+# 2. Calibration stages and what each should test
+
+## A. Global G1++ test
+
+Purpose:
+
+$$
+\boxed{
+\text{get a stable one-factor starting point, not perfect fit}
+}
+$$
+
+Diagnostics:
+
+```text
+g1Global.a
+g1Global.sigma
+RMSE annuity-normalized residual
+RMSE vol bp
+residual heatmap
+market vs model scatter
+```
+
+Expected:
+
+```text
+not perfect
+structured errors likely
+parameters positive
+residuals finite
+```
+
+---
+
+## B. Slice bootstrap tests
+
+Purpose:
+
+$$
+\boxed{
+\text{extract short- and long-tenor volatility shapes}
+}
+$$
+
+Here exact repricing of each calibrated slice is expected.
+
+So diagnostics should be:
+
+```text
+initial residual before solving bucket
+final residual after solving bucket
+shape smoothness
+no explosive bucket
+no negative bucket
+```
+
+Not:
+
+```text
+“market price equals model price” as if that proved the model
+```
+
+because the bootstrap is designed to force this equality.
+
+Useful metrics:
+
+$$
+\Delta \sigma_k = \sigma_k-\sigma_{k-1}
+$$
+
+$$
+\frac{\sigma_k}{\sigma_{k-1}}
+$$
+
+Flag jumps, not because they are impossible, but because they indicate unstable quotes or numerical issues.
+
+---
+
+## C. Scaled G2++ global test
+
+Purpose:
+
+$$
+\boxed{
+\text{fit the full surface using fixed G1++ shapes and reduced G2++ parameters}
+}
+$$
+
+Diagnostics:
+
+```text
+a, b, rho
+alphaSigma, alphaEta
+RMSE annuity-normalized price residual
+RMSE vol bp
+Max abs vol bp
+residual heatmap
+expiry/tenor residual slices
+optimizer exitflag
+```
+
+Expected:
+
+```text
+better than global G1++
+not necessarily perfect
+residuals should not show strong systematic bands
+rho within bounds and not stuck at boundary
+alphaSigma / alphaEta not absurd
+```
+
+---
+
+# 3. Graphical diagnostics
+
+## A. Heatmap of model implied vols
+
+Matrix:
+
+```text
+rows = expiries
+cols = tenors
+values = model implied vol
+```
+
+Compare visually to market vol heatmap.
+
+---
+
+## B. Heatmap of vol errors
+
+$$
+\sigma^{model}_{ij}-\sigma^{mkt}_{ij}
+$$
+
+in basis points.
+
+This is the main graph.
+
+Good calibration:
+
+```text
+small errors
+no strong diagonal band
+no one tenor column systematically wrong
+no one expiry row systematically wrong
+```
+
+---
+
+## C. Residual slices by tenor
+
+For selected tenors:
+
+```text
+x-axis = expiry
+y-axis = vol error bp
+```
+
+This detects whether the model misses short expiries, long expiries, or specific tenors.
+
+---
+
+## D. Residual slices by expiry
+
+For selected expiries:
+
+```text
+x-axis = tenor
+y-axis = vol error bp
+```
+
+This detects smile/term-structure deformation across the swap tenor dimension.
+
+---
+
+## E. Market vs model scatter
+
+$$
+x=\sigma^{mkt}, \qquad y=\sigma^{model}.
+$$
+
+Add the diagonal $y=x$.
+
+Good calibration:
+
+```text
+points near diagonal
+no curvature
+no cluster far away
+```
+
+---
+
+## F. Shape plot
+
+Plot:
+
+```text
+sigmaShapePack.shape
+etaShapePack.shape
+scaled sigma
+scaled eta
+```
+
+against bucket dates.
+
+This checks whether the final G2++ vol vectors are materially reasonable.
+
+---
+
+## G. Residual histogram
+
+Histogram of vol errors in bp.
+
+Useful but secondary. Residuals are not expected to be truly normal because quotes are structured across expiry/tenor.
+
+---
+
+# 4. Parameter stability diagnostics
+
+This is important for a reduced G2++ calibration.
+
+## A. Boundary check
+
+After calibration:
+
+```text
+a not at lower/upper bound
+b not at lower/upper bound
+rho not at -0.999 or 0.999
+alphaSigma not at bound
+alphaEta not at bound
+```
+
+If a parameter sits on a bound, the calibration is telling us the reduced specification is strained.
+
+---
+
+## B. Jacobian conditioning
+
+If `lsqnonlin` returns a Jacobian $J$, inspect singular values:
+
+$$
+J^\top J.
+$$
+
+Diagnostics:
+
+```text
+condition number of J
+singular values
+parameter correlation matrix
+```
+
+Poor conditioning means parameters are not well identified.
+
+Especially likely with:
+
+$$
+a,b,\rho,\alpha_\sigma,\alpha_\eta.
+$$
+
+---
+
+## C. Local bump stability
+
+Recalibrate from a few nearby starting points:
+
+```text
+theta0
+theta0 * mild perturbation
+rho0 shifted
+alphaSigma / alphaEta shifted
+```
+
+Then compare calibrated parameters and RMSE.
+
+Stable model:
+
+```text
+similar residuals
+similar parameters
+no chaotic jumps
+```
+
+---
+
+# 5. Recommended MLX sections
+
+Use this structure.
+
+```text
+MLX — XG2++ Calibration Diagnostics
 │
-├─ buildFullSurfaceCalibrationSetG2PP
-├─ residualScaledG2PP
-├─ solveScaledG2PP
-├─ setTemporaryScaledG2PPState
-├─ restoreScaledG2PPState
-└─ commitScaledG2PP
+├─ 1. Build calibration objects
+│     → pricers
+│     → surfacePack
+│     → xg2ppState
+│
+├─ 2. G1++ global initialization diagnostics
+│     → parameter table
+│     → residual summary
+│
+├─ 3. G1++ slice bootstrap diagnostics
+│     → sigma / eta shape table
+│     → initial vs final residual check
+│     → shape plot
+│
+├─ 4. Scaled G2++ global calibration diagnostics
+│     → final parameter table
+│     → residual summary
+│     → model vs market vol table
+│
+├─ 5. Graphical residual analysis
+│     → vol error heatmap
+│     → tenor slices
+│     → expiry slices
+│     → market vs model scatter
+│
+└─ 6. Stability checks
+      → boundary check
+      → optional restart sensitivity
+      → optional Jacobian conditioning
+```
+
+# 6. Minimal first version
+
+For the first rigorous MLX, do not implement everything.
+
+I would include:
+
+```text
+Numerical
+1. price residual RMSE
+2. annuity-normalized RMSE
+3. implied vol RMSE in bp
+4. max abs vol error bp
+5. parameter boundary check
+
+Graphical
+1. market vol heatmap
+2. model vol heatmap
+3. vol error heatmap
+4. residual by expiry for selected tenors
+5. sigma/eta shape plot
+```
+
+That is enough to judge whether the calibration is real or just mechanically running.
+
+## Response:
+5/18/2026, 4:43:39 PM
+
+> **Providing concise code for G2++ execution and testing**
+>
+> The user wants code for the G2++ global's state build and calibration, along with three key tests. I'll focus on the methods for building the shape state and full surface calibration, plus solution scaling. The tests should include shapeState dimensions, residuals, and economic/model fit. Concise MLX code required—no web references needed, and caution against committing before passing tests.
+>
+> Thought for 14s
+
+Below is the sober MLX block: build G2++ shape state, execute scaled global calibration, then run 3 tests.
+
+Assumes already in workspace:
+
+```matlab
+G2PP
+surfacePack
+pricers
+xg2ppState
+sigmaShapePack
+etaShapePack
+g1Global
+```
+
+```matlab
+%% G2++ scaled global calibration — state build and execution
+
+shapeState = G2PP.buildShapeStateG2PP( ...
+    sigmaShapePack, ...
+    etaShapePack, ...
+    xg2ppState);
+
+calibSetG2 = G2PP.buildFullSurfaceCalibrationSetG2PP( ...
+    surfacePack, ...
+    pricers);
+
+scaledResult = G2PP.solveScaledG2PP( ...
+    shapeState, ...
+    calibSetG2, ...
+    'objectiveType', 'normalizedPrice', ...
+    'useLsqnonlin', true, ...
+    'maxIterations', 300);
+```
+
+```matlab
+%% Test 1 — Plumbing: shape and bucket consistency
+
+assert(numel(shapeState.sigmaShape) == numel(shapeState.etaShape));
+assert(numel(shapeState.calibTimeStructure) == numel(shapeState.sigmaShape));
+
+assert(numel(shapeState.sigmaModel0) == numel(shapeState.calibTimeStructure) + 1);
+assert(numel(shapeState.etaModel0) == numel(shapeState.calibTimeStructure) + 1);
+
+assert(numel(calibSetG2) == surfacePack.nbQuotes);
+assert(numel(scaledResult.residuals) == numel(calibSetG2));
+
+assert(all(isfinite(shapeState.sigmaShape)));
+assert(all(isfinite(shapeState.etaShape)));
+assert(all(shapeState.sigmaShape > 0));
+assert(all(shapeState.etaShape > 0));
+```
+
+```matlab
+%% Test 2 — Numerical calibration: residual improvement and admissibility
+
+res0 = G2PP.residualScaledG2PP( ...
+    shapeState.theta0, ...
+    shapeState, ...
+    calibSetG2, ...
+    'objectiveType', 'normalizedPrice');
+
+resStar = scaledResult.residuals;
+
+rmse0 = sqrt(mean(res0.^2));
+rmseStar = sqrt(mean(resStar.^2));
+
+params = scaledResult.params;
+
+assert(all(isfinite(res0)));
+assert(all(isfinite(resStar)));
+assert(rmseStar <= rmse0 + 1e-10);
+
+assert(params.a > shapeState.bounds.lower(1));
+assert(params.a < shapeState.bounds.upper(1));
+assert(params.b > shapeState.bounds.lower(2));
+assert(params.b < shapeState.bounds.upper(2));
+assert(params.rho > shapeState.bounds.lower(3));
+assert(params.rho < shapeState.bounds.upper(3));
+assert(params.alphaSigma > shapeState.bounds.lower(4));
+assert(params.alphaSigma < shapeState.bounds.upper(4));
+assert(params.alphaEta > shapeState.bounds.lower(5));
+assert(params.alphaEta < shapeState.bounds.upper(5));
+
+scaledNumerics = table( ...
+    rmse0, ...
+    rmseStar, ...
+    params.a, ...
+    params.b, ...
+    params.rho, ...
+    params.alphaSigma, ...
+    params.alphaEta, ...
+    'VariableNames', { ...
+        'InitialRMSE', ...
+        'CalibratedRMSE', ...
+        'a', ...
+        'b', ...
+        'rho', ...
+        'alphaSigma', ...
+        'alphaEta'});
+```
+
+```matlab
+%% Test 3 — Economic fit: full-surface price errors
+
+oldState = G2PP.setTemporaryScaledG2PPState( ...
+    params.a, ...
+    params.b, ...
+    params.rho, ...
+    params.sigmaModel, ...
+    params.etaModel, ...
+    shapeState.calibTimeStructure);
+
+n = numel(calibSetG2);
+
+modelPricesG2 = NaN(n,1);
+marketPrices = NaN(n,1);
+annuityNormErrors = NaN(n,1);
+marketNormErrors = NaN(n,1);
+expiries = NaN(n,1);
+tenors = NaN(n,1);
+
+for k = 1:n
+    point = calibSetG2(k);
+
+    modelPricesG2(k) = G2PP.getSwaptionPriceG2PP( ...
+        point.strike, ...
+        point.expiry, ...
+        point.paymentDates, ...
+        'direction', point.direction, ...
+        'notional', point.notional);
+
+    marketPrices(k) = point.marketPrice;
+
+    annuityNormErrors(k) = ...
+        (modelPricesG2(k) - marketPrices(k)) / max(abs(point.annuity), 1.0);
+
+    marketNormErrors(k) = ...
+        (modelPricesG2(k) - marketPrices(k)) / max(abs(point.marketPrice), 1.0);
+
+    expiries(k) = point.expiry;
+    tenors(k) = surfacePack.tenorsYr(point.col);
+end
+
+G2PP.restoreScaledG2PPState(oldState);
+
+assert(all(isfinite(modelPricesG2)));
+assert(all(modelPricesG2 >= 0));
+assert(all(isfinite(annuityNormErrors)));
+
+priceRMSE = sqrt(mean((modelPricesG2 - marketPrices).^2));
+annuityNormRMSE = sqrt(mean(annuityNormErrors.^2));
+marketNormRMSE = sqrt(mean(marketNormErrors.^2));
+maxAbsAnnuityNormError = max(abs(annuityNormErrors));
+
+scaledFit = table( ...
+    priceRMSE, ...
+    annuityNormRMSE, ...
+    marketNormRMSE, ...
+    maxAbsAnnuityNormError, ...
+    'VariableNames', { ...
+        'PriceRMSE', ...
+        'AnnuityNormRMSE', ...
+        'MarketNormRMSE', ...
+        'MaxAbsAnnuityNormError'});
+```
+
+```matlab
+%% Compact outputs
+
+scaledNumerics
+scaledFit
+
+g2ppCalibDiag = table( ...
+    expiries, ...
+    tenors, ...
+    marketPrices, ...
+    modelPricesG2, ...
+    annuityNormErrors, ...
+    marketNormErrors, ...
+    'VariableNames', { ...
+        'Expiry', ...
+        'Tenor', ...
+        'MarketPrice', ...
+        'ModelPriceG2PP', ...
+        'AnnuityNormError', ...
+        'MarketNormError'});
+```
+
+Do **not** commit yet unless these pass and the final parameter values look sane. After that:
+
+```matlab
+G2PP.commitScaledG2PP(scaledResult);
+```
+
+## Response:
+5/18/2026, 4:48:08 PM
+
+> **Clarifying function completeness for G2++**
+>
+> To clarify: yes, we conceptually shipped code for the functions, but they may not be implemented yet in the file. The MLX relies on these actual functions. If you didn’t paste them, it won't work. You need to include these functions: `buildShapeStateG2PP`, `solveScaledG2PP`, `expandVolBucketsXG2PP`, etc. Without them, the test block won't run as expected.
+>
+> Thought for 9s
+
+Correct distinction:
+
+$$
+\boxed{
+\text{We designed the G2++ global layer and I drafted code, but we have not tested/validated those actual functions in your class yet.}
+}
+$$
+
+The MLX block I gave assumes the following methods already exist inside `GaussianTwoFactors`:
+
+```text
+buildShapeStateG2PP
+alignShapeBucketsG2PP
+initializeScaledG2PPState
+
+buildFullSurfaceCalibrationSetG2PP
+solveScaledG2PP
+residualScaledG2PP
+getScaledG2PPParams
+
+setTemporaryScaledG2PPState
+restoreScaledG2PPState
+commitScaledG2PP
+```
+
+And also this one from before:
+
+```text
+expandVolBucketsXG2PP
+```
+
+So the correct order is:
+
+```text
+1. Add the actual G2++ shape/global functions to the class.
+2. Run the MLX state-build + calibration execution.
+3. Then run the 3 tests.
+```
+
+At this point, the **G1++ block is implemented and tested enough**.
+
+The **G2++ global block is the next actual implementation block**. The MLX test was premature unless those methods have already been pasted into the class.
+
+So yes: before testing the G2++ scaled global calibration, we need to ship/add those actual functions cleanly.
+
+## Response:
+5/18/2026, 4:48:36 PM
+
+No. I rushed the sequencing.
+
+Correct state:
+
+```text
+Done / tested enough
+│
+├─ setup helpers
+├─ G1++ global calibration
+├─ G1++ slice bootstraps
+└─ basic G1++ pricing sanity
+
+Not actually implemented/tested yet
+│
+├─ G2++ shape assembly helpers
+├─ scaled G2++ residual
+├─ scaled G2++ solver
+└─ commit final G2++ state
+```
+
+Next move should be exactly one thing:
+
+$$
+\boxed{
+\text{ship the actual G2++ shape assembly + scaled calibration functions}
+}
+$$
+
+Then we write the MLX tests.
+
+## Response:
+5/18/2026, 4:49:00 PM
+
+> **Preparing and shipping consistent code**
+>
+> I need to prepare the code for shipping. I’ll focus on functions mentioned earlier and verify that they align with class methods. The goal is to ship the G2++ shape assembly and scaled calibration functions, ensuring consistency with the existing method `getSwaptionPriceG2PP`. Some errors occurred with mismatched formats, so I’ll make sure to fix those too.
+>
+> Thought for 18s
+
+Good. Here is the actual implementation block.
+
+Paste inside `methods` of `GaussianTwoFactors`.
+
+```matlab
+function volModel = expandVolBucketsXG2PP(obj, volCalib, terminalPolicy)
+    % G2++ Calibration Helper: Expands calibration volatility buckets into
+    % model volatility buckets using the terminal-bucket policy.
+    %#ok<INUSD>
+
+    volCalib = volCalib(:);
+
+    switch terminalPolicy
+        case 'flatLast'
+            volModel = [volCalib; volCalib(end)];
+
+        case 'zeroLast'
+            volModel = [volCalib; 0];
+
+        otherwise
+            error("Unsupported terminalPolicy.");
+    end
+end
+```
+
+```matlab
+function shapeState = buildShapeStateG2PP(obj, sigmaShapePack, etaShapePack, xg2ppState)
+    % G2++ Calibration Helper: Builds the two-factor shape state from the
+    % short-tenor and long-tenor G1++ slice bootstraps.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        sigmaShapePack (1,1) struct;
+        etaShapePack (1,1) struct;
+        xg2ppState (1,1) struct;
+    end
+
+    [calibTimeStructure, sigmaShape, etaShape] = obj.alignShapeBucketsG2PP( ...
+        sigmaShapePack, etaShapePack);
+
+    scaledState = obj.initializeScaledG2PPState( ...
+        xg2ppState, sigmaShape, etaShape);
+
+    sigmaModel0 = obj.expandVolBucketsXG2PP( ...
+        scaledState.initial.alphaSigma .* sigmaShape, ...
+        xg2ppState.terminalPolicy);
+
+    etaModel0 = obj.expandVolBucketsXG2PP( ...
+        scaledState.initial.alphaEta .* etaShape, ...
+        xg2ppState.terminalPolicy);
+
+    shapeState = struct();
+
+    shapeState.calibTimeStructure = calibTimeStructure(:);
+    shapeState.sigmaShape = sigmaShape(:);
+    shapeState.etaShape = etaShape(:);
+
+    shapeState.sigmaModel0 = sigmaModel0(:);
+    shapeState.etaModel0 = etaModel0(:);
+
+    shapeState.thetaNames = scaledState.thetaNames;
+    shapeState.theta0 = scaledState.theta0;
+    shapeState.bounds = scaledState.bounds;
+    shapeState.initial = scaledState.initial;
+
+    shapeState.terminalPolicy = xg2ppState.terminalPolicy;
+
+    shapeState.sigmaSource = sigmaShapePack.name;
+    shapeState.etaSource = etaShapePack.name;
+
+    shapeState.sigmaTenorIdx = sigmaShapePack.tenorIdx;
+    shapeState.etaTenorIdx = etaShapePack.tenorIdx;
+end
+```
+
+```matlab
+function [commonTimeStructure, sigmaShapeAligned, etaShapeAligned] = alignShapeBucketsG2PP(obj, sigmaShapePack, etaShapePack)
+    % G2++ Calibration Helper: Aligns two piecewise-constant G1++ shapes on
+    % a common expiry bucket grid.
+    %#ok<INUSD>
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        sigmaShapePack (1,1) struct;
+        etaShapePack (1,1) struct;
+    end
+
+    sigmaTime = sigmaShapePack.timeStructure(:);
+    etaTime = etaShapePack.timeStructure(:);
+
+    sigmaShape = sigmaShapePack.shape(:);
+    etaShape = etaShapePack.shape(:);
+
+    commonTimeStructure = unique([sigmaTime; etaTime]);
+    commonTimeStructure = sort(commonTimeStructure(:));
+
+    sigmaShapeAligned = NaN(numel(commonTimeStructure), 1);
+    etaShapeAligned = NaN(numel(commonTimeStructure), 1);
+
+    for k = 1:numel(commonTimeStructure)
+
+        t = commonTimeStructure(k);
+
+        idxSigma = find(sigmaTime >= t, 1, 'first');
+        idxEta = find(etaTime >= t, 1, 'first');
+
+        if isempty(idxSigma)
+            idxSigma = numel(sigmaShape);
+        end
+
+        if isempty(idxEta)
+            idxEta = numel(etaShape);
+        end
+
+        sigmaShapeAligned(k) = sigmaShape(idxSigma);
+        etaShapeAligned(k) = etaShape(idxEta);
+    end
+end
+```
+
+```matlab
+function scaledState = initializeScaledG2PPState(obj, xg2ppState, sigmaShape, etaShape)
+    % G2++ Calibration Helper: Builds the reduced G2++ starting vector and
+    % bounds for scaled-shape calibration.
+    %#ok<INUSD>
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        xg2ppState (1,1) struct;
+        sigmaShape (:,1) double;
+        etaShape (:,1) double;
+    end
+
+    thetaNames = ["a"; "b"; "rho"; "alphaSigma"; "alphaEta"];
+
+    theta0 = [
+        xg2ppState.initial.a
+        xg2ppState.initial.b
+        xg2ppState.initial.rho
+        xg2ppState.initial.alphaSigma
+        xg2ppState.initial.alphaEta
+    ];
+
+    scaledState = struct();
+
+    scaledState.thetaNames = thetaNames;
+    scaledState.theta0 = theta0(:);
+    scaledState.bounds = xg2ppState.bounds;
+
+    scaledState.initial = xg2ppState.initial;
+    scaledState.nbBuckets = numel(sigmaShape);
+    scaledState.sigmaShape = sigmaShape(:);
+    scaledState.etaShape = etaShape(:);
+end
+```
+
+```matlab
+function calibSet = buildFullSurfaceCalibrationSetG2PP(obj, surfacePack, pricers, args)
+    % G2++ Calibration Helper: Builds the full-surface calibration set used
+    % by the scaled G2++ residual.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        surfacePack (1,1) struct;
+        pricers (1,1) struct;
+
+        args.irs (:,1) IRSVanille = obj.irsDefault;
+        args.notional (1,1) double = 1e6;
+        args.settleType (1,:) char = 'CashSettled';
+    end
+
+    calibSet = [];
+    k = 0;
+
+    for i = 1:surfacePack.nbExpiries
+        for j = 1:surfacePack.nbTenors
+
+            if ~surfacePack.validMask(i,j)
+                continue
+            end
+
+            point = obj.buildCalibrationPointFromSurface( ...
+                surfacePack, pricers, i, j, ...
+                'irs', args.irs, ...
+                'notional', args.notional, ...
+                'settleType', args.settleType);
+
+            k = k + 1;
+
+            if k == 1
+                calibSet = point;
+            else
+                calibSet(k) = point;
+            end
+        end
+    end
+
+    if isempty(calibSet)
+        error("No valid G2++ calibration point was built.");
+    end
+end
+```
+
+```matlab
+function scaledResult = solveScaledG2PP(obj, shapeState, calibSet, args)
+    % G2++ Calibration Helper: Solves the reduced scaled-shape G2++
+    % calibration problem.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        shapeState (1,1) struct;
+        calibSet (1,:) struct;
+
+        args.objectiveType (1,:) char = 'normalizedPrice';
+        args.useLsqnonlin (1,1) logical = true;
+        args.maxIterations (1,1) double = 300;
+    end
+
+    theta0 = shapeState.theta0(:);
+    lb = shapeState.bounds.lower(:);
+    ub = shapeState.bounds.upper(:);
+
+    residualFun = @(theta) obj.residualScaledG2PP( ...
+        theta, shapeState, calibSet, ...
+        'objectiveType', args.objectiveType);
+
+    if args.useLsqnonlin && exist('lsqnonlin', 'file') == 2
+
+        options = optimoptions('lsqnonlin', ...
+            'Display', 'none', ...
+            'MaxIterations', args.maxIterations, ...
+            'FunctionTolerance', 1e-8, ...
+            'StepTolerance', 1e-8);
+
+        [thetaStar, resnorm, residuals, exitflag, output] = ...
+            lsqnonlin(residualFun, theta0, lb, ub, options);
+
+    else
+
+        options = optimset('Display', 'off', 'MaxIter', args.maxIterations);
+        objFun = @(theta) sum(residualFun(theta).^2);
+
+        [thetaStar, resnorm, exitflag, output] = ...
+            fminsearch(objFun, theta0, options);
+
+        residuals = residualFun(thetaStar);
+    end
+
+    params = obj.getScaledG2PPParams(thetaStar, shapeState);
+
+    scaledResult = struct();
+
+    scaledResult.thetaStar = thetaStar(:);
+    scaledResult.thetaNames = shapeState.thetaNames;
+
+    scaledResult.params = params;
+    scaledResult.shapeState = shapeState;
+
+    scaledResult.resnorm = resnorm;
+    scaledResult.residuals = residuals;
+    scaledResult.exitflag = exitflag;
+    scaledResult.output = output;
+
+    scaledResult.rmse = sqrt(mean(residuals.^2));
+    scaledResult.maxAbsResidual = max(abs(residuals));
+
+    scaledResult.calibSet = calibSet;
+end
+```
+
+```matlab
+function residuals = residualScaledG2PP(obj, thetaRaw, shapeState, calibSet, args)
+    % G2++ Calibration Helper: Full-surface residual for scaled-shape G2++.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        shapeState (1,1) struct;
+        calibSet (1,:) struct;
+
+        args.objectiveType (1,:) char = 'normalizedPrice';
+    end
+
+    theta = thetaRaw(:);
+
+    lb = shapeState.bounds.lower(:);
+    ub = shapeState.bounds.upper(:);
+
+    if any(theta < lb) || any(theta > ub)
+        residuals = 1e6 .* ones(numel(calibSet), 1);
+        return
+    end
+
+    params = obj.getScaledG2PPParams(theta, shapeState);
+
+    oldState = obj.setTemporaryScaledG2PPState( ...
+        params.a, ...
+        params.b, ...
+        params.rho, ...
+        params.sigmaModel, ...
+        params.etaModel, ...
+        shapeState.calibTimeStructure);
+
+    residuals = NaN(numel(calibSet), 1);
+
+    try
+        for k = 1:numel(calibSet)
+
+            point = calibSet(k);
+
+            try
+                modelPrice = obj.getSwaptionPriceG2PP( ...
+                    point.strike, ...
+                    point.expiry, ...
+                    point.paymentDates, ...
+                    'direction', point.direction, ...
+                    'notional', point.notional);
+            catch
+                modelPrice = NaN;
+            end
+
+            switch args.objectiveType
+                case 'price'
+                    scale = 1.0;
+
+                case 'normalizedPrice'
+                    scale = max(abs(point.annuity), 1.0);
+
+                case 'marketNormalizedPrice'
+                    scale = max(abs(point.marketPrice), 1.0);
+
+                otherwise
+                    error("Unsupported objectiveType.");
+            end
+
+            residuals(k) = sqrt(point.weight) .* ...
+                (modelPrice - point.marketPrice) ./ scale;
+
+            if ~isfinite(residuals(k))
+                residuals(k) = 1e6;
+            end
+        end
+
+        obj.restoreScaledG2PPState(oldState);
+
+    catch ME
+        obj.restoreScaledG2PPState(oldState);
+        rethrow(ME);
+    end
+end
+```
+
+```matlab
+function params = getScaledG2PPParams(obj, thetaRaw, shapeState)
+    % G2++ Calibration Helper: Converts the reduced scaled vector into full
+    % G2++ model parameters and volatility buckets.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        thetaRaw (:,1) double;
+        shapeState (1,1) struct;
+    end
+
+    theta = thetaRaw(:);
+
+    a = theta(1);
+    b = theta(2);
+    rho = theta(3);
+    alphaSigma = theta(4);
+    alphaEta = theta(5);
+
+    sigmaCalib = alphaSigma .* shapeState.sigmaShape(:);
+    etaCalib = alphaEta .* shapeState.etaShape(:);
+
+    sigmaModel = obj.expandVolBucketsXG2PP( ...
+        sigmaCalib, ...
+        shapeState.terminalPolicy);
+
+    etaModel = obj.expandVolBucketsXG2PP( ...
+        etaCalib, ...
+        shapeState.terminalPolicy);
+
+    params = struct();
+
+    params.a = a;
+    params.b = b;
+    params.rho = rho;
+
+    params.alphaSigma = alphaSigma;
+    params.alphaEta = alphaEta;
+
+    params.sigmaCalib = sigmaCalib;
+    params.etaCalib = etaCalib;
+
+    params.sigmaModel = sigmaModel(:);
+    params.etaModel = etaModel(:);
+end
+```
+
+```matlab
+function oldState = setTemporaryScaledG2PPState(obj, a, b, rho, sigmaModel, etaModel, volTimeStructure)
+    % G2++ Calibration Helper: Saves current state and sets temporary scaled
+    % G2++ model parameters.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        a (1,1) double;
+        b (1,1) double;
+        rho (1,1) double;
+        sigmaModel (:,1) double;
+        etaModel (:,1) double;
+        volTimeStructure (:,1) double;
+    end
+
+    if numel(sigmaModel) ~= numel(volTimeStructure) + 1
+        error("sigmaModel length must equal numel(volTimeStructure)+1.");
+    end
+
+    if numel(etaModel) ~= numel(volTimeStructure) + 1
+        error("etaModel length must equal numel(volTimeStructure)+1.");
+    end
+
+    oldState = struct();
+
+    oldState.meanReversion_x = obj.meanReversion_x;
+    oldState.meanReversion_y = obj.meanReversion_y;
+    oldState.volatility_sigma = obj.volatility_sigma;
+    oldState.volatility_eta = obj.volatility_eta;
+    oldState.volatilityTimeStructure = obj.volatilityTimeStructure;
+    oldState.volatilityTimeStructureDt = obj.volatilityTimeStructureDt;
+    oldState.correlation = obj.correlation;
+
+    obj.meanReversion_x = a;
+    obj.meanReversion_y = b;
+    obj.correlation = rho;
+
+    obj.volatility_sigma = sigmaModel(:).';
+    obj.volatility_eta = etaModel(:).';
+
+    obj.volatilityTimeStructure = volTimeStructure(:).';
+    obj.volatilityTimeStructureDt = [];
+end
+```
+
+```matlab
+function restoreScaledG2PPState(obj, oldState)
+    % G2++ Calibration Helper: Restores state after temporary scaled G2++
+    % pricing.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        oldState (1,1) struct;
+    end
+
+    obj.meanReversion_x = oldState.meanReversion_x;
+    obj.meanReversion_y = oldState.meanReversion_y;
+    obj.volatility_sigma = oldState.volatility_sigma;
+    obj.volatility_eta = oldState.volatility_eta;
+    obj.volatilityTimeStructure = oldState.volatilityTimeStructure;
+    obj.volatilityTimeStructureDt = oldState.volatilityTimeStructureDt;
+    obj.correlation = oldState.correlation;
+end
+```
+
+```matlab
+function commitScaledG2PP(obj, scaledResult)
+    % G2++ Calibration Helper: Commits the calibrated scaled G2++ parameters
+    % into the model object.
+
+    arguments
+        obj (1,1) GaussianTwoFactors;
+        scaledResult (1,1) struct;
+    end
+
+    params = scaledResult.params;
+    shapeState = scaledResult.shapeState;
+
+    obj.meanReversion_x = params.a;
+    obj.meanReversion_y = params.b;
+    obj.correlation = params.rho;
+
+    obj.volatility_sigma = params.sigmaModel(:).';
+    obj.volatility_eta = params.etaModel(:).';
+
+    obj.volatilityTimeStructure = shapeState.calibTimeStructure(:).';
+    obj.volatilityTimeStructureDt = [];
+end
+```
+
+Minimal execution after adding methods:
+
+```matlab
+shapeState = G2PP.buildShapeStateG2PP( ...
+    sigmaShapePack, ...
+    etaShapePack, ...
+    xg2ppState);
+
+calibSetG2 = G2PP.buildFullSurfaceCalibrationSetG2PP( ...
+    surfacePack, ...
+    pricers);
+
+scaledResult = G2PP.solveScaledG2PP( ...
+    shapeState, ...
+    calibSetG2, ...
+    'objectiveType', 'normalizedPrice', ...
+    'useLsqnonlin', true, ...
+    'maxIterations', 300);
+```
+
 
 ---
 
