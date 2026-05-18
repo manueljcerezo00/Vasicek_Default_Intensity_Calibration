@@ -4904,9 +4904,101 @@ table(rLow, rMid, rHigh)
 So the calibration layer never handles baskets or Gaussian states directly.
 
 ```matlab
-priceSwaptionG1PP
+%% Minimal G1++ pricing audit
+
+row0 = surfacePack.quoteRows(1);
+col0 = surfacePack.quoteCols(1);
+
+point0 = G2PP.buildCalibrationPointFromSurface( ...
+    surfacePack, pricers, row0, col0);
+
+stateBefore.meanReversion_x = G2PP.meanReversion_x;
+stateBefore.meanReversion_y = G2PP.meanReversion_y;
+stateBefore.volatility_sigma = G2PP.volatility_sigma;
+stateBefore.volatility_eta = G2PP.volatility_eta;
+stateBefore.volatilityTimeStructure = G2PP.volatilityTimeStructure;
+stateBefore.volatilityTimeStructureDt = G2PP.volatilityTimeStructureDt;
+stateBefore.correlation = G2PP.correlation;
+
+aTest = max(G2PP.meanReversion_x, 0.05);
+volTimeStructure = max(surfacePack.matSwapDatesYr(:)) + 1.0;
+
+volLow  = 0.005 .* ones(2,1);
+volMid  = 0.010 .* ones(2,1);
+volHigh = 0.020 .* ones(2,1);
+
+priceLow = G2PP.priceSwaptionG1PP( ...
+    point0.strike, point0.expiry, point0.paymentDates, ...
+    aTest, volLow, volTimeStructure, ...
+    'direction', point0.direction, ...
+    'notional', point0.notional);
+
+priceMid = G2PP.priceSwaptionG1PP( ...
+    point0.strike, point0.expiry, point0.paymentDates, ...
+    aTest, volMid, volTimeStructure, ...
+    'direction', point0.direction, ...
+    'notional', point0.notional);
+
+priceHigh = G2PP.priceSwaptionG1PP( ...
+    point0.strike, point0.expiry, point0.paymentDates, ...
+    aTest, volHigh, volTimeStructure, ...
+    'direction', point0.direction, ...
+    'notional', point0.notional);
+
+assert(isfinite(priceLow));
+assert(isfinite(priceMid));
+assert(isfinite(priceHigh));
+assert(priceLow <= priceMid + 1e-8);
+assert(priceMid <= priceHigh + 1e-8);
+
+pricePAY = G2PP.priceSwaptionG1PP( ...
+    point0.strike, point0.expiry, point0.paymentDates, ...
+    aTest, volMid, volTimeStructure, ...
+    'direction', 'PAY', ...
+    'notional', point0.notional);
+
+priceREC = G2PP.priceSwaptionG1PP( ...
+    point0.strike, point0.expiry, point0.paymentDates, ...
+    aTest, volMid, volTimeStructure, ...
+    'direction', 'REC', ...
+    'notional', point0.notional);
+
+oldState = G2PP.setTemporaryG1PPState(aTest, volMid, volTimeStructure);
+basketMid = G2PP.getBondBasketG1PP(point0.expiry, point0.paymentDates);
+G2PP.restoreG1PPState(oldState);
+
+deltaMid = diff([point0.expiry; point0.paymentDates(:)]);
+
+coeffsMid = point0.strike .* deltaMid;
+coeffsMid(end) = coeffsMid(end) + 1.0;
+
+parityRHS = point0.notional .* ...
+    (basketMid.P0T0 - sum(coeffsMid .* basketMid.P0Ti(:)));
+
+parityError = (pricePAY - priceREC) - parityRHS;
+
+assert(abs(parityError) <= 1e-6 * ...
+    max(1, abs(pricePAY) + abs(priceREC) + abs(parityRHS)));
+
+assert(isequaln(G2PP.meanReversion_x, stateBefore.meanReversion_x));
+assert(isequaln(G2PP.meanReversion_y, stateBefore.meanReversion_y));
+assert(isequaln(G2PP.volatility_sigma, stateBefore.volatility_sigma));
+assert(isequaln(G2PP.volatility_eta, stateBefore.volatility_eta));
+assert(isequaln(G2PP.volatilityTimeStructure, stateBefore.volatilityTimeStructure));
+assert(isequaln(G2PP.volatilityTimeStructureDt, stateBefore.volatilityTimeStructureDt));
+assert(isequaln(G2PP.correlation, stateBefore.correlation));
+
+auditG1PP = table( ...
+    priceLow, priceMid, priceHigh, pricePAY, priceREC, parityError, ...
+    'VariableNames', {'PriceLow','PriceMid','PriceHigh','PricePAY','PriceREC','ParityError'});
 ```
 
+```matlab
+priceSwaptionG1PP
+```
+```matlab
+priceSwaptionG1PP
+```
 ```matlab
 priceSwaptionG1PP
 ```
