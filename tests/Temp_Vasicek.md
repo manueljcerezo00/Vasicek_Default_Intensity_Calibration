@@ -5006,5 +5006,20 @@ priceSwaptionG1PP
 priceSwaptionG1PP
 ```
 
+SHAPE ASSEMBLY
+│
+├─ buildShapeStateG2PP
+├─ alignShapeBucketsG2PP
+└─ initializeScaledG2PPState
+
+SCALED G2++ CALIBRATION
+│
+├─ buildFullSurfaceCalibrationSetG2PP
+├─ residualScaledG2PP
+├─ solveScaledG2PP
+├─ setTemporaryScaledG2PPState
+├─ restoreScaledG2PPState
+└─ commitScaledG2PP
+
 ---
 
