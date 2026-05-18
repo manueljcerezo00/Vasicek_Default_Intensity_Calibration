@@ -1,24 +1,5 @@
 # Calibration Procedure Review
 
-**User:** Anonymous  
-**Created:** 5/12/2026 21:05:48  
-**Updated:** 5/13/2026 0:00:04  
-**Exported:** 5/13/2026 0:07:28  
-**Link:** [https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/6a037a08-7fac-8384-8ad6-c27b237736b4](https://chatgpt.com/g/g-p-69f3ccd06ce88191966dfce0df25eb6f-g2/c/6a037a08-7fac-8384-8ad6-c27b237736b4)  
-
-## Response:
-5/12/2026, 11:48:00 PM
-
-> **Correcting misunderstanding and refining citation approach**
->
-> It looks like I need to apologize and provide the correct summary with file citations. Since the file content doesn't have line markers, I'll just use the parsed text pages and cite the file properly with the format indicated. I'll make sure to include the required citations from earlier.
->
-> Thought for 17s
-
-You’re right. I had blurred two things.
-
-The paper’s procedure is **not** “G2++ bootstrap bucket by bucket on a co-terminal vector.” That was a reasonable engineering variant, but it is **not Bonino-Casalini**.
-
 Bonino-Casalini’s calibration has **three steps**.
 
 ## Correct reading of the paper
@@ -173,7 +154,6 @@ BoninoCalibrationG2PP
        parameters = [a,b,α,β,ρ]
 ```
 
-If your manager wants to keep mean reversions fixed, then the production variant is:
 
 $$
 a,b \text{ fixed},
@@ -265,8 +245,6 @@ $$
 \eta_k=q\sigma_k
 $$
 
-was our engineering shortcut. It is **not Bonino**.
-
 Bonino’s dimensional reduction is instead:
 
 $$
@@ -280,13 +258,7 @@ That is the key proposition we must now encode.
 ## Response:
 5/12/2026, 11:54:54 PM
 
-> **Clarifying analogy and citation for shape scaling**
->
-> The user asks about an analogy related to scaling. I'll differentiate multiplicative scaling of shape from an exponential transformation. For the multiplicative scaling, applying positive constants (alpha, beta) preserves the shape of the function, but adjusts its level. Regarding citations, it seems I can reference the file without line numbers, as previous responses did the same.
->
-> Thought for 8s
 
-Yes, but they act at **different levels**.
 
 Bonino’s multiplicative structure is:
 
@@ -332,7 +304,7 @@ u+\log \sigma_k^s,
 v+\log \eta_k^s.
 $$
 
-So yes: **multiplicative scaling becomes additive after log transformation**. But conceptually:
+
 
 $$
 \boxed{
@@ -357,32 +329,7 @@ sigma = alpha .* sigmaShape;
 eta   = beta  .* etaShape;
 ```
 
-## Response:
-5/12/2026, 11:58:34 PM
 
-> **Clarifying citation format for paper reference**
->
-> I need to decide how to make citations for the user's paper. I’ve already used file content in context, but it doesn’t include specific line numbers. Instructions suggest I need line ranges, which wasn’t available in earlier results. I’ll check if a different method can give more precise citations.
->
-> **Reassessing strategy and reuse of functions**
->
-> The user wants a detailed but concise strategy. I’ll focus on rethinking the pipeline from G2++ to Bonino, while identifying reusable functions. Functions like `buildCalibrationGrid` and `buildPricers` seem useful. For Bonino's Step 2, I might reuse the existing calibrator. I’ll need specific adapter functions for slice bootstrap.
->
-> **Revisiting vector integration and Bonino Step 3 implementation**
->
-> I can propose integrating the vector after `g2ppBucketPriceResidual`. However, to calibrate the full surface, we need instrument packs and market prices. I’ll create a function, like `initializeBoninoStateG2PP`, that accepts `sigmaShape/etaShape`. For now, we can implement Step 3's scaled G2++ layer and add the initialization hook without fully implementing G1++.
->
-> **Focusing on Bonino Step 3 implementation and functions**
->
-> Since mclick doesn't provide line numbers, we’ll cite with file markers. For the strategy, I won’t continue the local loop and will pivot to focus on Step 3’s global calibration. We’ll implement necessary functions like `boninoScaledG2PPCalibration`, `validateBoninoShapesG2PP`, and others, to orchestrate the process based on G1++ calibration.
->
-> Thought for 45s
-
-Object: **Bonino-compatible calibration layer after your current `g2ppBucketPriceResidual` stage**.
-
-The correction is structural: **do not keep extending the one-bucket G2++ residual as the main Bonino path**. That helper is still useful as a test tool or alternative local calibration. But Bonino-Casalini’s final G2++ step is not local bucket-by-bucket. They first build two volatility shapes from two G1++ slice bootstraps, then globally calibrate scalar multipliers and correlation on the whole swaption surface. The paper explicitly uses shortest-tenor and longest-tenor G1++ slices for Step 2, then sets $\sigma=\alpha\sigma^s$, $\eta=\beta\eta^s$, and calibrates the reduced G2++ model globally. `ssrn-3598285 (1).pdf` `ssrn-3598285 (1).pdf`
-
-So the strategy is:
 
 $$
 \boxed{
