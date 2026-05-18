@@ -4873,14 +4873,46 @@ priceSwaptionG1PP
 This method should remain internal:
 
 ```matlab
-priceFromG1PPBasket
+k = 5;
+
+rowK = etaShapePack.quoteRows(k);
+colK = etaShapePack.tenorIdx;
+
+pointK = G2PP.buildCalibrationPointFromSurface( ...
+    calibVolSurface, pricers, rowK, colK);
+
+volSolved = etaShapePack.shape(k);
+
+rLow = G2PP.residualBucketG1PP( ...
+    0.50 * volSolved, k, etaShapePack.shape, ...
+    etaShapePack.timeStructure, pointK, g1Global.a, ...
+    'objectiveType', 'price');
+
+rMid = G2PP.residualBucketG1PP( ...
+    volSolved, k, etaShapePack.shape, ...
+    etaShapePack.timeStructure, pointK, g1Global.a, ...
+    'objectiveType', 'price');
+
+rHigh = G2PP.residualBucketG1PP( ...
+    1.50 * volSolved, k, etaShapePack.shape, ...
+    etaShapePack.timeStructure, pointK, g1Global.a, ...
+    'objectiveType', 'price');
+
+table(rLow, rMid, rHigh)
 ```
 
 So the calibration layer never handles baskets or Gaussian states directly.
 
+```matlab
+priceSwaptionG1PP
+```
 
-
----
+```matlab
+priceSwaptionG1PP
+```
+```matlab
+priceSwaptionG1PP
+```
 
 ---
 
