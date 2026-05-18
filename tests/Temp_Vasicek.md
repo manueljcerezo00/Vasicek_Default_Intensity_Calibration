@@ -4462,5 +4462,478 @@ onePointCheck = table( ...
 
 disp(onePointCheck);
 ```
+
+# Calibration Pipeline Review
+
+Yes. Up to now, the tests should target two layers.
+
+```text
+TEST BLOCK 1 — Structural plumbing
+    → methods exist
+    → surfacePack dimensions
+    → xg2ppState slice indices
+    → calibration point construction
+    → temporary G1++ state is restored
+
+TEST BLOCK 2 — First calibration fundamentals
+    → constant G1++ global calibration runs
+    → slice bootstrap runs
+    → G1++ price is finite and nonnegative
+    → calibrated slice instrument reprices its market target reasonably
+```
+
+Below is a sober MLX block.
+
+```matlab
+%% XG2++ calibration pipeline — first tests
+% Assumption:
+%   A GaussianTwoFactors object already exists in the workspace and already
+%   contains a swaption volatility cube.
+%
+% Rename here if your object has another name.
+
+G2PP = G2PP;   % keep or replace by your actual object name
+calibMoneyness = 0;
+
+%% 1. Structural plumbing tests
+
+requiredMethods = [
+    "buildPricersG2PP"
+    "buildVolSurfacePackXG2PP"
+    "initCalibXG2PP"
+    "parseTenorsXG2PP"
+    "buildCalibrationPointFromSurface"
+    "calibrateGlobalG1PP"
+    "residualGlobalG1PP"
+    "bootstrapSliceG1PP"
+    "residualBucketG1PP"
+    "priceSwaptionG1PP"
+    "setTemporaryG1PPState"
+    "restoreG1PPState"
+    "getBondBasketG1PP"
+    "variXOnly"
+    "getStateGaussianG1PP"
+    "meanForwardG1PP"
+    "solveXBarG1PP"
+    "priceFromG1PPBasket"
+    "expandVolBucketsXG2PP"
+];
+
+availableMethods = string(methods(G2PP));
+missingMethods = setdiff(requiredMethods, availableMethods);
+
+assert(isempty(missingMethods), ...
+    "Missing methods: " + strjoin(missingMethods, ", "));
+
+pricers = G2PP.buildPricersG2PP();
+
+surfacePack = G2PP.buildVolSurfacePackXG2PP(calibMoneyness);
+
+xg2ppState = G2PP.initCalibXG2PP(surfacePack);
+
+assert(isequal(size(surfacePack.volMatrix), size(surfacePack.validMask)));
+assert(isequal(size(surfacePack.startSwapDates), size(surfacePack.volMatrix)));
+assert(isequal(size(surfacePack.matSwapDates), size(surfacePack.volMatrix)));
+
+assert(numel(surfacePack.expiryDatesYr) == surfacePack.nbExpiries);
+assert(numel(surfacePack.tenorsYr) == surfacePack.nbTenors);
+assert(numel(surfacePack.quoteValues) == surfacePack.nbQuotes);
+assert(numel(surfacePack.quoteRows) == surfacePack.nbQuotes);
+assert(numel(surfacePack.quoteCols) == surfacePack.nbQuotes);
+
+assert(xg2ppState.shortTenorIdx >= 1);
+assert(xg2ppState.shortTenorIdx <= surfacePack.nbTenors);
+assert(xg2ppState.longTenorIdx >= 1);
+assert(xg2ppState.longTenorIdx <= surfacePack.nbTenors);
+
+assert(any(surfacePack.validMask(:, xg2ppState.shortTenorIdx)));
+assert(any(surfacePack.validMask(:, xg2ppState.longTenorIdx)));
+
+disp("Structural setup tests passed.");
+```
+
+```matlab
+%% 2. Calibration point construction test
+
+row0 = surfacePack.quoteRows(1);
+col0 = surfacePack.quoteCols(1);
+
+point0 = G2PP.buildCalibrationPointFromSurface( ...
+    surfacePack, pricers, row0, col0);
+
+assert(isfinite(point0.strike));
+assert(isfinite(point0.marketVol));
+assert(isfinite(point0.marketPrice));
+assert(isfinite(point0.annuity));
+assert(point0.marketPrice >= 0);
+assert(all(point0.paymentDates > point0.expiry));
+
+assert(strcmp(point0.direction, 'PAY') || strcmp(point0.direction, 'REC'));
+
+disp("Calibration point construction test passed.");
+```
+
+```matlab
+%% 3. Temporary G1++ state restoration test
+
+stateBefore = struct();
+stateBefore.meanReversion_x = G2PP.meanReversion_x;
+stateBefore.meanReversion_y = G2PP.meanReversion_y;
+stateBefore.volatility_sigma = G2PP.volatility_sigma;
+stateBefore.volatility_eta = G2PP.volatility_eta;
+stateBefore.volatilityTimeStructure = G2PP.volatilityTimeStructure;
+stateBefore.volatilityTimeStructureDt = G2PP.volatilityTimeStructureDt;
+stateBefore.correlation = G2PP.correlation;
+
+tmpVolTimeStructure = max(surfacePack.expiryDatesYr) + 1;
+tmpVolVector = 0.01 .* ones(2,1);
+
+oldState = G2PP.setTemporaryG1PPState( ...
+    0.10, ...
+    tmpVolVector, ...
+    tmpVolTimeStructure);
+
+G2PP.restoreG1PPState(oldState);
+
+assert(isequaln(G2PP.meanReversion_x, stateBefore.meanReversion_x));
+assert(isequaln(G2PP.meanReversion_y, stateBefore.meanReversion_y));
+assert(isequaln(G2PP.volatility_sigma, stateBefore.volatility_sigma));
+assert(isequaln(G2PP.volatility_eta, stateBefore.volatility_eta));
+assert(isequaln(G2PP.volatilityTimeStructure, stateBefore.volatilityTimeStructure));
+assert(isequaln(G2PP.volatilityTimeStructureDt, stateBefore.volatilityTimeStructureDt));
+assert(isequaln(G2PP.correlation, stateBefore.correlation));
+
+disp("Temporary G1++ state restoration test passed.");
+```
+
+```matlab
+%% 4. Single G1++ price sanity test
+
+aTest = max(G2PP.meanReversion_x, 0.05);
+sigmaTest = 0.01;
+
+volTimeStructure = max(surfacePack.matSwapDatesYr(:)) + 1;
+volVector = sigmaTest .* ones(2,1);
+
+priceG1 = G2PP.priceSwaptionG1PP( ...
+    point0.strike, ...
+    point0.expiry, ...
+    point0.paymentDates, ...
+    aTest, ...
+    volVector, ...
+    volTimeStructure, ...
+    'direction', point0.direction, ...
+    'notional', point0.notional);
+
+assert(isfinite(priceG1));
+assert(priceG1 >= 0);
+
+assert(isequaln(G2PP.meanReversion_x, stateBefore.meanReversion_x));
+assert(isequaln(G2PP.volatility_sigma, stateBefore.volatility_sigma));
+assert(isequaln(G2PP.volatility_eta, stateBefore.volatility_eta));
+
+disp("Single G1++ price sanity test passed.");
+```
+
+```matlab
+%% 5. Global G1++ calibration test
+
+g1Global = G2PP.calibrateGlobalG1PP( ...
+    surfacePack, ...
+    pricers, ...
+    'initialA', aTest, ...
+    'initialSigma', sigmaTest, ...
+    'useLsqnonlin', true, ...
+    'objectiveType', 'normalizedPrice');
+
+assert(isfinite(g1Global.a));
+assert(isfinite(g1Global.sigma));
+assert(g1Global.a > 0);
+assert(g1Global.sigma > 0);
+assert(all(isfinite(g1Global.residuals)));
+
+disp("Global G1++ calibration test passed.");
+```
+
+```matlab
+%% 6. Short-tenor slice bootstrap test
+
+sigmaShapePack = G2PP.bootstrapSliceG1PP( ...
+    surfacePack, ...
+    pricers, ...
+    g1Global, ...
+    'tenorIdx', xg2ppState.shortTenorIdx, ...
+    'shapeName', 'sigma', ...
+    'objectiveType', 'normalizedPrice');
+
+assert(all(isfinite(sigmaShapePack.shape)));
+assert(all(sigmaShapePack.shape > 0));
+assert(all(isfinite(sigmaShapePack.modelPrices)));
+assert(all(isfinite(sigmaShapePack.marketPrices)));
+
+disp("Short-tenor G1++ bootstrap test passed.");
+```
+
+```matlab
+%% 7. Long-tenor slice bootstrap test
+
+etaShapePack = G2PP.bootstrapSliceG1PP( ...
+    surfacePack, ...
+    pricers, ...
+    g1Global, ...
+    'tenorIdx', xg2ppState.longTenorIdx, ...
+    'shapeName', 'eta', ...
+    'objectiveType', 'normalizedPrice');
+
+assert(all(isfinite(etaShapePack.shape)));
+assert(all(etaShapePack.shape > 0));
+assert(all(isfinite(etaShapePack.modelPrices)));
+assert(all(isfinite(etaShapePack.marketPrices)));
+
+disp("Long-tenor G1++ bootstrap test passed.");
+```
+
+```matlab
+%% 8. Reprice one calibrated slice instrument
+
+k = numel(sigmaShapePack.shape);
+
+rowK = sigmaShapePack.quoteRows(k);
+colK = sigmaShapePack.tenorIdx;
+
+pointK = G2PP.buildCalibrationPointFromSurface( ...
+    surfacePack, pricers, rowK, colK);
+
+volVectorK = G2PP.expandVolBucketsXG2PP( ...
+    sigmaShapePack.shape(1:k), ...
+    xg2ppState.terminalPolicy);
+
+volTimeStructureK = sigmaShapePack.timeStructure(1:k);
+
+priceK = G2PP.priceSwaptionG1PP( ...
+    pointK.strike, ...
+    pointK.expiry, ...
+    pointK.paymentDates, ...
+    g1Global.a, ...
+    volVectorK, ...
+    volTimeStructureK, ...
+    'direction', pointK.direction, ...
+    'notional', pointK.notional);
+
+normalizedErrorK = abs(priceK - pointK.marketPrice) / ...
+    max(pointK.notional * pointK.annuity, 1e-12);
+
+assert(isfinite(priceK));
+assert(priceK >= 0);
+assert(isfinite(normalizedErrorK));
+
+resultOneInstrument = table( ...
+    pointK.expiry, ...
+    surfacePack.tenorsYr(colK), ...
+    pointK.marketPrice, ...
+    priceK, ...
+    normalizedErrorK, ...
+    'VariableNames', {'Expiry','Tenor','MarketPrice','ModelPrice','NormalizedError'});
+
+disp(resultOneInstrument);
+```
+
+```matlab
+%% 9. Compact diagnostics
+
+diagnostics = struct();
+
+diagnostics.globalG1.a = g1Global.a;
+diagnostics.globalG1.sigma = g1Global.sigma;
+diagnostics.globalG1.rmse = g1Global.rmse;
+diagnostics.globalG1.maxAbsResidual = g1Global.maxAbsResidual;
+
+diagnostics.shortSlice.maxAbsPriceError = max(abs( ...
+    sigmaShapePack.modelPrices - sigmaShapePack.marketPrices));
+
+diagnostics.longSlice.maxAbsPriceError = max(abs( ...
+    etaShapePack.modelPrices - etaShapePack.marketPrices));
+
+diagnostics.shortSlice.nbBuckets = numel(sigmaShapePack.shape);
+diagnostics.longSlice.nbBuckets = numel(etaShapePack.shape);
+
+disp(diagnostics);
+```
+
+One detail to watch: if `bootstrapSliceG1PP` still contains the hardcoded line
+
+```matlab
+volVector = [shape(1:k); shape(k)];
+```
+
+replace it by
+
+```matlab
+volVector = G2PP.expandVolBucketsXG2PP( ...
+    shape(1:k), ...
+    xg2ppState.terminalPolicy);
+```
+
+or pass `'terminalPolicy'` directly into `bootstrapSliceG1PP`. Otherwise the test still runs, but `terminalPolicy` is not actually being tested.
+
+## Response:
+5/18/2026, 12:13:10 PM
+
+They have different jobs.
+
+```text
+priceSwaptionG1PP
+    = state wrapper + orchestration
+
+priceFromG1PPBasket
+    = pure pricing formula once inputs are prepared
+```
+
+# 1. `priceSwaptionG1PP`
+
+This is the method called by calibration residuals.
+
+It receives the natural calibration inputs:
+
+```matlab
+strike
+expiry
+paymentDates
+a
+volVector
+volTimeStructure
+```
+
+Then it does the dangerous part:
+
+```matlab
+oldState = obj.setTemporaryG1PPState(...)
+```
+
+So its responsibility is:
+
+```text
+save G2++ state
+→ set temporary G1++ state
+→ build basket
+→ build Gaussian law
+→ call closed-form price
+→ restore G2++ state
+```
+
+It owns object-state safety.
+
+---
+
+# 2. `priceFromG1PPBasket`
+
+This method assumes the state-dependent objects are already prepared:
+
+```matlab
+basket
+gaussian
+```
+
+So it does only the mathematical pricing:
+
+$$
+P(0,T_0)
+\mathbb E^{T_0}
+\left[
+\left(
+1-\sum_i c_i A_i e^{-B_i X}
+\right)^+
+\right].
+$$
+
+It owns:
+
+```text
+coefficients c_i
+Jamshidian boundary xBar
+h0, h1, kappa
+payer/receiver formula
+final price
+```
+
+It should not mutate the object.
+
+---
+
+# 3. Why having two is useful
+
+Because it separates the only dangerous part from the formula:
+
+```text
+priceSwaptionG1PP
+    can mutate object temporarily.
+
+priceFromG1PPBasket
+    must never mutate object.
+```
+
+This makes bugs easier to locate.
+
+If pricing is wrong but state restoration is fine, inspect `priceFromG1PPBasket`.
+
+If the object gets polluted after calibration, inspect `priceSwaptionG1PP`.
+
+---
+
+# 4. Should we keep both?
+
+I would keep both.
+
+This is not over-fragmentation. It is the right split:
+
+```text
+wrapper / state safety
+formula / numerical pricing
+```
+
+But I would maybe rename the second one to make its role clearer:
+
+```matlab
+pricePreparedG1PPBasket
+```
+
+or
+
+```matlab
+priceG1PPFromBasket
+```
+
+Then the architecture reads better:
+
+```text
+priceSwaptionG1PP
+│
+├─ setTemporaryG1PPState
+├─ getBondBasketG1PP
+├─ getStateGaussianG1PP
+├─ priceG1PPFromBasket
+└─ restoreG1PPState
+```
+
+# 5. Minimal rule
+
+Only this method should appear in calibration residuals:
+
+```matlab
+priceSwaptionG1PP
+```
+
+This method should remain internal:
+
+```matlab
+priceFromG1PPBasket
+```
+
+So the calibration layer never handles baskets or Gaussian states directly.
+
+
+
+---
+
 ---
 
