@@ -4993,18 +4993,8 @@ auditG1PP = table( ...
     'VariableNames', {'PriceLow','PriceMid','PriceHigh','PricePAY','PriceREC','ParityError'});
 ```
 
-```matlab
-priceSwaptionG1PP
-```
-```matlab
-priceSwaptionG1PP
-```
-```matlab
-priceSwaptionG1PP
-```
-```matlab
-priceSwaptionG1PP
-```
+
+
 
 # Calibration Pipeline Review
 
@@ -6788,6 +6778,74 @@ scaledResult = G2PP.solveScaledG2PP( ...
     'maxIterations', 300);
 ```
 
+
+```matlab
+function plotSwaptionCubeByStrike(volCubeObj)
+
+    % Expected objects / fields:
+    % volCubeObj.expiries  : [nExp x 1]
+    % volCubeObj.tenors    : [nTenor x 1]
+    % volCubeObj.strikes   : [nStrike x 1]
+    % volCubeObj.vols      : [nExp x nTenor x nStrike]
+
+    expiries = volCubeObj.expiries(:);
+    tenors   = volCubeObj.tenors(:);
+    strikes  = volCubeObj.strikes(:);
+    vols     = volCubeObj.vols;
+
+    [Tnr, Exp] = meshgrid(tenors, expiries);
+
+    fig = uifigure('Name', 'Swaption Vol Cube');
+    fig.Position = [100 100 900 600];
+
+    ax = uiaxes(fig);
+    ax.Position = [60 80 780 460];
+
+    dd = uidropdown(fig);
+    dd.Position = [60 550 180 30];
+    dd.Items = compose('%.4f', strikes);
+    dd.Value = dd.Items{1};
+
+    k0 = 1;
+    h = surf(ax, Tnr, Exp, vols(:,:,k0));
+
+    xlabel(ax, 'Swap tenor');
+    ylabel(ax, 'Expiry');
+    zlabel(ax, 'Volatility');
+    title(ax, sprintf('Swaption vol surface | Strike = %.4f', strikes(k0)));
+
+    shading(ax, 'interp');
+    grid(ax, 'on');
+    view(ax, 45, 25);
+
+    dd.ValueChangedFcn = @(src, event) updateSurface(src, h, ax, vols, strikes);
+
+end
+
+function updateSurface(src, h, ax, vols, strikes)
+
+    strikeValue = str2double(src.Value);
+    [~, k] = min(abs(strikes - strikeValue));
+
+    h.ZData = vols(:,:,k);
+
+    title(ax, sprintf('Swaption vol surface | Strike = %.4f', strikes(k)));
+
+end
+```
+
+
+
+
+```matlab
+priceSwaptionG1PP
+```
+```matlab
+priceSwaptionG1PP
+```
+```matlab
+priceSwaptionG1PP
+```
 
 ---
 
